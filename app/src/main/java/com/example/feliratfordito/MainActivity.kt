@@ -12,12 +12,9 @@ import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
-import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.provider.Settings
 import android.util.Size
 import android.util.TypedValue
 import android.view.Gravity
@@ -26,7 +23,6 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
-import android.widget.PopupMenu
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
@@ -45,8 +41,6 @@ import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
-import androidx.core.content.pm.PackageInfoCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.google.android.material.card.MaterialCardView
@@ -63,7 +57,6 @@ import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -87,7 +80,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var zoomBar: SeekBar
     private lateinit var statusCard: MaterialCardView
     private lateinit var translationCard: MaterialCardView
-    private lateinit var updateBtn: Button
     private lateinit var recFab: FloatingActionButton
     private lateinit var recIndicator: TextView
     private var preview: Preview? = null
@@ -157,13 +149,12 @@ class MainActivity : AppCompatActivity() {
         statusCard = findViewById(R.id.statusCard)
         translationCard = findViewById(R.id.translationCard)
         zoomBar = findViewById(R.id.zoomBar)
-        updateBtn = findViewById(R.id.updateBtn)
         recFab = findViewById(R.id.recFab)
         recIndicator = findViewById(R.id.recIndicator)
 
-        updateBtn.setOnClickListener { startUpdate() }
         recFab.setOnClickListener { toggleRecording() }
-        findViewById<View>(R.id.menuBtn).setOnClickListener { v -> showMenu(v) }
+        findViewById<View>(R.id.menuBtn).setOnClickListener { finish() }   // vissza a főmenübe
+        boxView.onDoubleTap = { resetBox() }
         statusCard.setOnClickListener { if (translatorReady) statusCard.visibility = View.GONE }
 
         cropNorm = loadBox()
@@ -212,7 +203,6 @@ class MainActivity : AppCompatActivity() {
             }
 
         analysisExecutor = Executors.newSingleThreadExecutor()
-        checkForUpdate()
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
@@ -272,28 +262,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---------- Menü és beállítások ----------
-
-    private fun showMenu(anchor: View) {
-        val pm = PopupMenu(this, anchor)
-        pm.menu.add(0, 1, 0, "Felvételek és összefoglalók")
-        pm.menu.add(0, 2, 1, "Beállítások")
-        pm.menu.add(0, 3, 2, "Keret alaphelyzetbe")
-        pm.menu.add(0, 4, 3, "Súgó")
-        pm.setOnMenuItemClickListener { item ->
-            when (item.itemId) {
-                1 -> startActivity(Intent(this, SummaryActivity::class.java))
-                2 -> startActivity(Intent(this, SettingsActivity::class.java))
-                3 -> resetBox()
-                4 -> showStatus(
-                    "1. Zoomolj rá a tévére\n2. Húzd a sárga keretet a feliratra\n" +
-                        "3. Felül megjelenik a magyar fordítás\n\n" +
-                        "Piros gomb: beszélgetés felvétele, utána összefoglaló.\n(Koppints ide a bezáráshoz)"
-                )
-            }
-            true
-        }
-        pm.show()
-    }
 
     override fun onResume() {
         super.onResume()
@@ -849,116 +817,6 @@ class MainActivity : AppCompatActivity() {
             val tmp = prev; prev = cur; cur = tmp
         }
         return prev[b.length]
-    }
-
-    // ---------- Frissítés a GitHub-ról ----------
-
-    private val apkUrl = "https://github.com/kondasadam/FeliratFordito/releases/latest/download/FeliratFordito.apk"
-    private var downloading = false
-    private var downloadedApk: File? = null
-
-    private fun currentVersion(): Long = try {
-        PackageInfoCompat.getLongVersionCode(packageManager.getPackageInfo(packageName, 0))
-    } catch (e: Exception) {
-        0L
-    }
-
-    private fun checkForUpdate() {
-        Thread {
-            try {
-                val c = URL("https://api.github.com/repos/kondasadam/FeliratFordito/releases/latest")
-                    .openConnection() as HttpURLConnection
-                c.connectTimeout = 5000
-                c.readTimeout = 5000
-                c.setRequestProperty("Accept", "application/vnd.github+json")
-                if (c.responseCode == 200) {
-                    val json = JSONObject(c.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() })
-                    val latest = json.optString("tag_name").removePrefix("v").toLongOrNull() ?: 0L
-                    if (latest > currentVersion()) {
-                        runOnUiThread {
-                            updateBtn.text = "Frissítés elérhető"
-                            updateBtn.visibility = View.VISIBLE
-                        }
-                    }
-                }
-                c.disconnect()
-            } catch (e: Exception) {
-                // nincs internet: nincs frissítésjelzés
-            }
-        }.start()
-    }
-
-    private fun startUpdate() {
-        if (downloading) return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
-            showStatus("Engedélyezd az appnak a frissítések telepítését,\nmajd lépj vissza, és nyomd meg újra a Frissítés gombot.")
-            try {
-                startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
-            } catch (e: Exception) { }
-            return
-        }
-        downloadedApk?.let { if (it.exists()) { installApk(it); return } }
-
-        downloading = true
-        if (translatorReady) statusCard.visibility = View.GONE
-        updateBtn.text = "Letöltés…"
-        Thread {
-            val file = File(File(cacheDir, "updates").apply { mkdirs() }, "FeliratFordito.apk")
-            val ok = try {
-                val c = URL(apkUrl).openConnection() as HttpURLConnection
-                c.instanceFollowRedirects = true
-                c.connectTimeout = 15000
-                c.readTimeout = 30000
-                val total = c.contentLengthLong
-                c.inputStream.use { input ->
-                    file.outputStream().use { out ->
-                        val buf = ByteArray(64 * 1024)
-                        var done = 0L
-                        var lastPct = -1
-                        while (true) {
-                            val n = input.read(buf)
-                            if (n < 0) break
-                            out.write(buf, 0, n)
-                            done += n
-                            if (total > 0) {
-                                val pct = (done * 100 / total).toInt()
-                                if (pct != lastPct) {
-                                    lastPct = pct
-                                    runOnUiThread { updateBtn.text = "Letöltés $pct%" }
-                                }
-                            }
-                        }
-                    }
-                }
-                c.disconnect()
-                true
-            } catch (e: Exception) {
-                false
-            }
-            runOnUiThread {
-                downloading = false
-                if (ok) {
-                    downloadedApk = file
-                    updateBtn.text = "Telepítés"
-                    installApk(file)
-                } else {
-                    updateBtn.text = "Frissítés (újra)"
-                    showStatus("A frissítés letöltése nem sikerült. Ellenőrizd az internetet.")
-                }
-            }
-        }.start()
-    }
-
-    private fun installApk(file: File) {
-        try {
-            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
-            val intent = Intent(Intent.ACTION_VIEW)
-                .setDataAndType(uri, "application/vnd.android.package-archive")
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-            startActivity(intent)
-        } catch (e: Exception) {
-            showStatus("A telepítő nem indult el: ${e.message}")
-        }
     }
 
     override fun onDestroy() {

@@ -21,6 +21,14 @@ class SubtitleBoxView @JvmOverloads constructor(
 ) : View(context, attrs) {
 
     var onBoxChanged: ((RectF) -> Unit)? = null
+    var onDoubleTap: (() -> Unit)? = null
+
+    private val gestures = android.view.GestureDetector(context, object : android.view.GestureDetector.SimpleOnGestureListener() {
+        override fun onDoubleTap(e: MotionEvent): Boolean {
+            onDoubleTap?.invoke()
+            return true
+        }
+    })
 
     private val box = RectF(0.1f, 0.6f, 0.9f, 0.85f)   // 0..1 arányban
     private val px = RectF()
@@ -80,6 +88,7 @@ class SubtitleBoxView @JvmOverloads constructor(
         updatePx()
         val x = event.x
         val y = event.y
+        if (px.contains(x, y)) gestures.onTouchEvent(event)
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 val tol = 36f * density
