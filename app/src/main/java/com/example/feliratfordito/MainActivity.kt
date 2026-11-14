@@ -105,7 +105,7 @@ class MainActivity : AppCompatActivity() {
 
     private var imageCapture: ImageCapture? = null
     private val capturing = AtomicBoolean(false)
-    private var readMode = "photo"   // photo = éles fényképekből (pontos), video = videóképből (gyors)
+    private var readMode = "video"   // photo = éles fényképekből (pontos), video = videóképből (gyors)
 
     private var camera: Camera? = null
     private lateinit var analysisExecutor: ExecutorService
@@ -237,7 +237,11 @@ class MainActivity : AppCompatActivity() {
             }
 
         analysisExecutor = Executors.newSingleThreadExecutor()
-        readMode = prefs.getString("readMode", "photo") ?: "photo"
+        if (!prefs.getBoolean("readModeV2", false)) {
+            // új alapértelmezés: gyors videós leolvasás (a pontosságot Profi módban a Gemini adja)
+            prefs.edit().putString("readMode", "video").putBoolean("readModeV2", true).apply()
+        }
+        readMode = prefs.getString("readMode", "video") ?: "video"
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
@@ -321,7 +325,7 @@ class MainActivity : AppCompatActivity() {
             lastSource = ""
         }
         settingsVer = v
-        val m = prefs.getString("readMode", "photo") ?: "photo"
+        val m = prefs.getString("readMode", "video") ?: "video"
         if (m != readMode) {
             readMode = m
             if (camera != null) startCamera()
@@ -917,7 +921,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-        }, 600)
+        }, 250)
     }
 
     /** Egy feliratváltás összes sora egyetlen Gemini-kérésben. Hiba vagy rossz sorszám esetén null. */

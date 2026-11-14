@@ -12,6 +12,7 @@ object Gemini {
 
     @Volatile var pausedUntil = 0L
     @Volatile var lastError = ""
+    @Volatile private var noThinkingConfig = HashSet<String>()   // modellek, amelyek nem fogadják a thinkingConfig-ot
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences("beallitasok", Context.MODE_PRIVATE)
 
@@ -34,7 +35,7 @@ object Gemini {
         }
         val model = modelOverride ?: prefs(ctx).getString("geminiModel", DEFAULT_MODEL).orEmpty().trim().ifEmpty { DEFAULT_MODEL }
 
-        for (attempt in 0..1) {
+        for (attempt in (if (model in noThinkingConfig) 1 else 0)..1) {
             val gen = JSONObject().put("temperature", 0.2).put("maxOutputTokens", maxTokens)
             if (attempt == 0) gen.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
             val req = JSONObject()
@@ -93,7 +94,10 @@ object Gemini {
                 }
                 c.errorStream?.close()
                 c.disconnect()
-                if (code == 400 && attempt == 0) continue   // pl. a modell nem ismeri a thinkingConfig-ot
+                if (code == 400 && attempt == 0) {   // a modell nem ismeri a thinkingConfig-ot: megjegyezzük
+                    noThinkingConfig = HashSet(noThinkingConfig).apply { add(model) }
+                    continue
+                }
                 lastError = when (code) {
                     402 -> "elfogyott a kredit"
                     400, 401, 403 -> "rossz kulcs? ($code)"

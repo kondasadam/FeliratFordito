@@ -107,7 +107,7 @@ class SettingsActivity : AppCompatActivity() {
 
         // Leolvasás módja
         val readGroup = findViewById<RadioGroup>(R.id.readGroup)
-        readGroup.check(if (prefs.getString("readMode", "photo") == "video") R.id.readVideo else R.id.readPhoto)
+        readGroup.check(if (prefs.getString("readMode", "video") == "photo") R.id.readPhoto else R.id.readVideo)
         readGroup.setOnCheckedChangeListener { _, id ->
             prefs.edit().putString("readMode", if (id == R.id.readVideo) "video" else "photo").apply()
         }
