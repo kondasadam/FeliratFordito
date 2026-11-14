@@ -12,6 +12,11 @@
         android:layout_height="match_parent"
         app:scaleType="fillCenter" />
 
+    <com.example.feliratfordito.TranslationOverlayView
+        android:id="@+id/overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
     <com.example.feliratfordito.SubtitleBoxView
         android:id="@+id/boxView"
         android:layout_width="match_parent"

@@ -22,6 +22,25 @@ class SubtitleBoxView @JvmOverloads constructor(
 
     var onBoxChanged: ((RectF) -> Unit)? = null
     var onDoubleTap: (() -> Unit)? = null
+    var onPinch: ((Float) -> Unit)? = null
+    var onPinchEnd: (() -> Unit)? = null
+    private var pinching = false
+
+    private val scaleDetector = android.view.ScaleGestureDetector(context,
+        object : android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScaleBegin(detector: android.view.ScaleGestureDetector): Boolean {
+                pinching = true
+                mode = Mode.NONE   // két ujjnál nem mozgatjuk a keretet
+                return true
+            }
+            override fun onScale(detector: android.view.ScaleGestureDetector): Boolean {
+                onPinch?.invoke(detector.scaleFactor)
+                return true
+            }
+            override fun onScaleEnd(detector: android.view.ScaleGestureDetector) {
+                onPinchEnd?.invoke()
+            }
+        })
 
     private val gestures = android.view.GestureDetector(context, object : android.view.GestureDetector.SimpleOnGestureListener() {
         override fun onDoubleTap(e: MotionEvent): Boolean {
@@ -88,6 +107,14 @@ class SubtitleBoxView @JvmOverloads constructor(
         updatePx()
         val x = event.x
         val y = event.y
+        scaleDetector.onTouchEvent(event)
+        if (pinching || event.pointerCount > 1) {
+            if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
+                pinching = false
+                mode = Mode.NONE
+            }
+            return true
+        }
         if (px.contains(x, y)) gestures.onTouchEvent(event)
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
@@ -103,7 +130,7 @@ class SubtitleBoxView @JvmOverloads constructor(
                 }
                 lastX = x
                 lastY = y
-                return mode != Mode.NONE
+                return true   // a második ujj (csípés) eseményeit is meg kell kapnunk
             }
             MotionEvent.ACTION_MOVE -> {
                 if (mode == Mode.NONE || width == 0 || height == 0) return false

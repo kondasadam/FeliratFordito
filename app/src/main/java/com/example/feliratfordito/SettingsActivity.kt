@@ -51,6 +51,13 @@ class SettingsActivity : AppCompatActivity() {
         bindText(R.id.gameEdit, "game", "")
         bindText(R.id.modelEdit, "geminiModel", Gemini.DEFAULT_MODEL)
 
+        // Megjelenítés módja
+        val modeGroup = findViewById<RadioGroup>(R.id.modeGroup)
+        modeGroup.check(if (prefs.getString("displayMode", "ar") == "card") R.id.modeCard else R.id.modeAr)
+        modeGroup.setOnCheckedChangeListener { _, id ->
+            prefs.edit().putString("displayMode", if (id == R.id.modeCard) "card" else "ar").apply()
+        }
+
         // Betűméret
         val sample = findViewById<TextView>(R.id.sizeSample)
         val slider = findViewById<Slider>(R.id.sizeSlider)

@@ -116,9 +116,9 @@ class HomeActivity : AppCompatActivity() {
         })
         val steps = listOf(
             "Tedd a telefont egy tartóba úgy, hogy lássa a tévét (állva vagy fekve is jó).",
-            "Nyomd meg a „Fordítás indítása” gombot, és a zoommal nagyíts rá a képre.",
+            "Nyomd meg a „Fordítás indítása” gombot, és két ujjal nagyíts rá a tévére.",
             "Húzd a sárga keretet a felirat helyére. Dupla koppintás a kereten: alaphelyzet.",
-            "A magyar fordítás a képernyő tetején jelenik meg. Szürke = gyors, fehér = pontos.",
+            "A magyar szöveg az angol felirat helyén jelenik meg a képen. (A Beállításokban kérhetsz külön kártyát is.)",
             "Beszélgetés elején nyomd meg a piros gombot, a végén újra: kapsz egy összefoglalót.",
             "Pontosabb fordításhoz add meg a Gemini-kulcsot és a játék nevét a Beállításokban."
         )

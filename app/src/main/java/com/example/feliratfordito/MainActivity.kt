@@ -85,6 +85,12 @@ class MainActivity : AppCompatActivity() {
     private var preview: Preview? = null
     private var analysis: ImageAnalysis? = null
     private var settingsVer = -1
+    private lateinit var overlay: TranslationOverlayView
+    private var arMode = true          // fordítás a felirat helyén (a képen)
+    private var emptyReads = 0
+
+    /** A kivágott sáv helye a nézetben (a felismert szöveg visszavetítéséhez). */
+    private class CropMap(val l: Float, val t: Float, val scale: Float, val offX: Float, val offY: Float, var enh: Float = 1f)
 
     private var camera: Camera? = null
     private lateinit var analysisExecutor: ExecutorService
@@ -143,6 +149,7 @@ class MainActivity : AppCompatActivity() {
 
         previewView = findViewById(R.id.previewView)
         boxView = findViewById(R.id.boxView)
+        overlay = findViewById(R.id.overlay)
         translatedText = findViewById(R.id.translatedText)
         sourceText = findViewById(R.id.sourceText)
         statusText = findViewById(R.id.statusText)
@@ -176,13 +183,25 @@ class MainActivity : AppCompatActivity() {
 
         zoomBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
-                camera?.cameraControl?.setLinearZoom(progress / 100f)
+                if (fromUser) camera?.cameraControl?.setLinearZoom(progress / 100f)
             }
             override fun onStartTrackingTouch(sb: SeekBar?) {}
             override fun onStopTrackingTouch(sb: SeekBar?) = zoomChanged()
         })
-        findViewById<View>(R.id.zoomOut).setOnClickListener { zoomBar.progress = (zoomBar.progress - 10).coerceAtLeast(0); zoomChanged() }
-        findViewById<View>(R.id.zoomIn).setOnClickListener { zoomBar.progress = (zoomBar.progress + 10).coerceAtMost(100); zoomChanged() }
+        findViewById<View>(R.id.zoomOut).setOnClickListener { setLinearZoom(zoomBar.progress - 10) }
+        findViewById<View>(R.id.zoomIn).setOnClickListener { setLinearZoom(zoomBar.progress + 10) }
+
+        // Két ujjas nagyítás / kicsinyítés, mint a kameránál
+        boxView.onPinch = { factor ->
+            camera?.let { cam ->
+                val zs = cam.cameraInfo.zoomState.value
+                if (zs != null) {
+                    val ratio = (zs.zoomRatio * factor).coerceIn(zs.minZoomRatio, zs.maxZoomRatio)
+                    cam.cameraControl.setZoomRatio(ratio)
+                }
+            }
+        }
+        boxView.onPinchEnd = { zoomChanged() }
 
         recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
         translator = Translation.getClient(
@@ -214,6 +233,13 @@ class MainActivity : AppCompatActivity() {
     private fun showStatus(msg: String) {
         statusText.text = msg
         statusCard.visibility = View.VISIBLE
+    }
+
+    private fun setLinearZoom(progress: Int) {
+        val p = progress.coerceIn(0, 100)
+        zoomBar.progress = p
+        camera?.cameraControl?.setLinearZoom(p / 100f)
+        zoomChanged()
     }
 
     private fun zoomChanged() {
@@ -279,6 +305,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyDisplayPrefs() {
+        arMode = prefs.getString("displayMode", "ar") == "ar"
+        overlay.visibility = if (arMode) View.VISIBLE else View.GONE
+        translationCard.visibility = if (arMode) View.GONE else View.VISIBLE
         textSizeSp = prefs.getFloat("meret", 26f)
         translatedText.setTextSize(TypedValue.COMPLEX_UNIT_SP, textSizeSp)
         sourceText.visibility = if (prefs.getBoolean("angol", true)) View.VISIBLE else View.GONE
@@ -329,6 +358,9 @@ class MainActivity : AppCompatActivity() {
                 provider.unbindAll()
                 camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
                 camera?.cameraControl?.setLinearZoom(zoomBar.progress / 100f)
+                camera?.cameraInfo?.zoomState?.observe(this) { zs ->
+                    zoomBar.progress = (zs.linearZoom * 100).toInt()
+                }
 
                 mainHandler.removeCallbacks(periodicFocus)
                 mainHandler.postDelayed(periodicFocus, 800)
@@ -376,19 +408,21 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val rotation = proxy.imageInfo.rotationDegrees
-        val crop: Bitmap? = try {
+        val cropped: Pair<Bitmap, CropMap>? = try {
             extractCrop(proxy, rotation)
         } catch (e: Exception) {
             null
         } finally {
             proxy.close()
         }
-        if (crop == null) return
+        if (cropped == null) return
+        val (crop, map) = cropped
 
-        val input = enhance(crop)
+        val (input, enh) = enhance(crop)
+        map.enh = enh
         busy.set(true)
         recognizer.process(InputImage.fromBitmap(input, rotation))
-            .addOnSuccessListener { result -> handleText(result) }
+            .addOnSuccessListener { result -> handleText(result, map) }
             .addOnFailureListener { busy.set(false) }
     }
 
@@ -396,7 +430,7 @@ class MainActivity : AppCompatActivity() {
      * A képernyőn kijelölt sávot átszámolja a kamerakép (puffer) koordinátáira.
      * A PreviewView "fillCenter" módban van: a kép kitölti a nézetet, a széleket levágja.
      */
-    private fun cropRectInBuffer(bw: Int, bh: Int, rotation: Int): Rect? {
+    private fun cropRectInBuffer(bw: Int, bh: Int, rotation: Int): Pair<Rect, CropMap>? {
         val sideways = rotation == 90 || rotation == 270
         val iw = if (sideways) bh else bw   // a kép szélessége kijelzett helyzetben
         val ih = if (sideways) bw else bh
@@ -426,12 +460,12 @@ class MainActivity : AppCompatActivity() {
         val y = y0.toInt().coerceIn(0, bh - 1)
         val w = (x1.toInt() - x).coerceIn(1, bw - x)
         val h = (y1.toInt() - y).coerceIn(1, bh - y)
-        return Rect(x, y, x + w, y + h)
+        return Pair(Rect(x, y, x + w, y + h), CropMap(l, t, scale, offX, offY))
     }
 
     /** Csak a kijelölt sávot másolja ki a kameraképből (gyors, nagy felbontásnál is). */
-    private fun extractCrop(proxy: ImageProxy, rotation: Int): Bitmap? {
-        val rect = cropRectInBuffer(proxy.width, proxy.height, rotation) ?: return null
+    private fun extractCrop(proxy: ImageProxy, rotation: Int): Pair<Bitmap, CropMap>? {
+        val (rect, map) = cropRectInBuffer(proxy.width, proxy.height, rotation) ?: return null
         val plane = proxy.planes[0]
         val buf = plane.buffer
         buf.rewind()
@@ -450,11 +484,11 @@ class MainActivity : AppCompatActivity() {
         out.rewind()
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         bmp.copyPixelsFromBuffer(out)
-        return bmp
+        return Pair(bmp, map)
     }
 
     /** Szürkeárnyalat + kontrasztnövelés (+ nagyítás, ha kicsi): a mozgó háttér kevésbé zavar. */
-    private fun enhance(src: Bitmap): Bitmap {
+    private fun enhance(src: Bitmap): Pair<Bitmap, Float> {
         val scale = if (src.width < 900 && src.height < 900) 2f else 1f
         val w = (src.width * scale).toInt()
         val h = (src.height * scale).toInt()
@@ -474,17 +508,43 @@ class MainActivity : AppCompatActivity() {
         )
         val paint = Paint(Paint.FILTER_BITMAP_FLAG).apply { colorFilter = ColorMatrixColorFilter(matrix) }
         Canvas(out).drawBitmap(src, null, RectF(0f, 0f, w.toFloat(), h.toFloat()), paint)
-        return out
+        return Pair(out, scale)
     }
 
     // ---------- Felismert szöveg (fő szálon) ----------
 
-    private fun handleText(result: Text) {
-        val blocks = result.textBlocks
+    /** Felismert szövegdoboz -> hely a képernyőn. */
+    private fun toViewRect(b: Rect, m: CropMap) = RectF(
+        m.offX + (m.l + b.left / m.enh) * m.scale,
+        m.offY + (m.t + b.top / m.enh) * m.scale,
+        m.offX + (m.l + b.right / m.enh) * m.scale,
+        m.offY + (m.t + b.bottom / m.enh) * m.scale
+    )
+
+    private fun handleText(result: Text, map: CropMap) {
+        val kept = result.textBlocks
             .sortedBy { it.boundingBox?.top ?: 0 }
-            .map { block -> cleanup(block.lines.joinToString(" ") { it.text }) }
-            .filter { s -> s.count { it.isLetter() } >= 3 }
+            .mapNotNull { block ->
+                val t = cleanup(block.lines.joinToString(" ") { it.text })
+                val box = block.boundingBox
+                if (t.count { it.isLetter() } < 3 || box == null) null
+                else {
+                    val lineH = (block.lines.firstOrNull()?.boundingBox?.height() ?: box.height()) / map.enh * map.scale
+                    Triple(t, toViewRect(box, map), lineH)
+                }
+            }
+        val blocks = kept.map { it.first }
+        val rects = kept.map { it.second }
+        val lineHeights = kept.map { it.third }
         val source = blocks.joinToString("\n")
+
+        // A felirat eltűnt: pár üres kép után a képről is levesszük a fordítást
+        if (source.isEmpty()) {
+            emptyReads++
+            if (emptyReads >= 3) overlay.clear()
+        } else {
+            emptyReads = 0
+        }
 
         if (source.isNotEmpty()) {
             recentReads.addLast(source)
@@ -493,6 +553,14 @@ class MainActivity : AppCompatActivity() {
 
         // Üres kép: marad az utolsó fordítás. Ugyanaz a felirat: nincs újrafordítás (nem villog).
         if (source.isEmpty() || similar(source, lastSource)) {
+            if (source.isNotEmpty()) {
+                // ugyanaz a felirat: a fordítás kövesse, ha kicsit elmozdult a kép
+                if (overlay.count == rects.size) overlay.moveRects(rects)
+                else if (overlay.count == 0 && lastTranslations.isNotEmpty()) {
+                    overlay.setRects(rects, lineHeights)
+                    overlay.setTexts(lastTranslations)
+                }
+            }
             candidate = ""
             busy.set(false)
             return
@@ -513,6 +581,8 @@ class MainActivity : AppCompatActivity() {
 
         lastSource = best
         sourceText.text = best
+        lastTranslations = emptyList()
+        overlay.setRects(rects, lineHeights)
         if (recording && (recLines.isEmpty() || !similar(recLines.last(), best))) recLines.add(best)
         translateBlocks(finalBlocks)
     }
@@ -573,10 +643,13 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- Fordítás: azonnal offline -> Google -> (ha kint marad) Gemini ----------
 
+    private var lastTranslations: List<String> = emptyList()
+
     private fun showLines(lines: List<Line>, tr: List<String>, engine: String) {
-        translatedText.text = lines.indices.joinToString("\n") { i ->
-            lines[i].speaker?.let { "$it: ${tr[i]}" } ?: tr[i]
-        }
+        val texts = lines.indices.map { i -> lines[i].speaker?.let { "$it: ${tr[i]}" } ?: tr[i] }
+        lastTranslations = texts
+        overlay.setTexts(texts)
+        translatedText.text = texts.joinToString("\n")
         // szürkés = gyors offline, fehér = online (Google / Gemini)
         translatedText.setTextColor(if (engine == "offline") Color.rgb(190, 190, 190) else Color.WHITE)
         sourceText.text = if (engine == "offline") lastSource else "$lastSource   [$engine]"
