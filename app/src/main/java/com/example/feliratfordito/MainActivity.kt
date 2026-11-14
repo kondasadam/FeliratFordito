@@ -40,6 +40,7 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
@@ -98,6 +99,7 @@ class MainActivity : AppCompatActivity() {
     /** A kivágott sáv helye a nézetben (a felismert szöveg visszavetítéséhez). */
     private class CropMap(val l: Float, val t: Float, val scale: Float, val offX: Float, val offY: Float) {
         var enh: Float = 1f          // OCR előtti nagyítás
+        var sample: Float = 1f       // a kép ennyiszer kisebb a teljes felbontásnál (fénykép dekódolás)
         var img: Bitmap? = null      // a kivágott sáv színesben, álló helyzetben (háttérszín mintához)
     }
 
@@ -295,6 +297,8 @@ class MainActivity : AppCompatActivity() {
         preview?.targetRotation = rot
         analysis?.targetRotation = rot
         imageCapture?.targetRotation = rot
+        // elforgatás után más a nézet képaránya: a közös képkivágás miatt újrakötjük a kamerát
+        previewView.post { if (camera != null) startCamera() }
         cropNorm = loadBox()
         boxView.setBox(cropNorm)
         candidate = ""
@@ -346,6 +350,11 @@ class MainActivity : AppCompatActivity() {
     // ---------- Kamera ----------
 
     private fun startCamera() {
+        // a közös képkivágáshoz (viewport) a nézetnek már méretének kell lennie
+        if (previewView.viewPort == null) {
+            previewView.post { startCamera() }
+            return
+        }
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
             try {
@@ -378,7 +387,7 @@ class MainActivity : AppCompatActivity() {
                         .build()
                     imageCapture = ic
                     analysis = null
-                    camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, ic)
+                    camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, group(preview, ic))
                     mainHandler.postDelayed(captureTick, 600)
                 } else {
                     // Gyors mód: videókép (4K, ha a telefon tudja)
@@ -401,7 +410,7 @@ class MainActivity : AppCompatActivity() {
                     an.setAnalyzer(analysisExecutor) { proxy -> analyze(proxy) }
                     analysis = an
                     imageCapture = null
-                    camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, an)
+                    camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, group(preview, an))
                 }
                 camera?.cameraControl?.setLinearZoom(zoomBar.progress / 100f)
                 camera?.cameraInfo?.zoomState?.observe(this) { zs ->
@@ -414,6 +423,14 @@ class MainActivity : AppCompatActivity() {
                 showStatus("A kamera nem indult el: ${e.message}")
             }
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    /** Közös képkivágás: a fénykép / videókép pontosan azt a területet fedi, ami az élő képen látszik. */
+    private fun group(vararg cases: androidx.camera.core.UseCase): UseCaseGroup {
+        val b = UseCaseGroup.Builder()
+        previewView.viewPort?.let { b.setViewPort(it) }
+        cases.forEach { b.addUseCase(it) }
+        return b.build()
     }
 
     private val focusNow = Runnable { focusOnBox() }
@@ -510,7 +527,7 @@ class MainActivity : AppCompatActivity() {
     private fun processStill(image: ImageProxy) {
         val rotation = image.imageInfo.rotationDegrees
         val result: Pair<Bitmap, CropMap>? = try {
-            val cr = cropRectInBuffer(image.width, image.height, rotation)
+            val cr = cropRectInBuffer(image.width, image.height, rotation, image.cropRect)
             if (cr == null) null else {
                 val buf = image.planes[0].buffer
                 buf.rewind()
@@ -518,11 +535,11 @@ class MainActivity : AppCompatActivity() {
                 buf.get(bytes)
                 @Suppress("DEPRECATION")
                 val decoder = BitmapRegionDecoder.newInstance(bytes, 0, bytes.size, false)
-                val opts = BitmapFactory.Options().apply {
-                    inSampleSize = if (cr.first.width() > 2600 || cr.first.height() > 2600) 2 else 1
-                }
+                val sample = if (cr.first.width() > 2600 || cr.first.height() > 2600) 2 else 1
+                val opts = BitmapFactory.Options().apply { inSampleSize = sample }
                 val bmp = decoder?.decodeRegion(cr.first, opts)
                 decoder?.recycle()
+                cr.second.sample = sample.toFloat()
                 if (bmp == null) null else Pair(bmp, cr.second)
             }
         } catch (e: Exception) {
@@ -537,10 +554,15 @@ class MainActivity : AppCompatActivity() {
      * A képernyőn kijelölt sávot átszámolja a kamerakép (puffer) koordinátáira.
      * A PreviewView "fillCenter" módban van: a kép kitölti a nézetet, a széleket levágja.
      */
-    private fun cropRectInBuffer(bw: Int, bh: Int, rotation: Int): Pair<Rect, CropMap>? {
+    private fun cropRectInBuffer(bw: Int, bh: Int, rotation: Int, visibleRect: Rect?): Pair<Rect, CropMap>? {
+        // A képnek az a része, ami az élő képen látszik (a viewport miatt minden use case-nél ugyanaz)
+        val vis = if (visibleRect != null && visibleRect.width() > 0 && visibleRect.height() > 0
+            && visibleRect.right <= bw && visibleRect.bottom <= bh) visibleRect else Rect(0, 0, bw, bh)
+        val cw = vis.width()
+        val ch = vis.height()
         val sideways = rotation == 90 || rotation == 270
-        val iw = if (sideways) bh else bw   // a kép szélessége kijelzett helyzetben
-        val ih = if (sideways) bw else bh
+        val iw = if (sideways) ch else cw   // a látható rész szélessége kijelzett helyzetben
+        val ih = if (sideways) cw else ch
 
         val vw = viewW.toFloat()
         val vh = viewH.toFloat()
@@ -555,24 +577,24 @@ class MainActivity : AppCompatActivity() {
         val b = ((box.bottom * vh - offY) / scale).coerceIn(0f, ih.toFloat())
         if (r - l < 8f || b - t < 8f) return null
 
-        // kijelzett -> puffer koordináták (rotation = ennyivel kell órajárás szerint forgatni)
+        // kijelzett -> a látható rész koordinátái (rotation = ennyivel kell órajárás szerint forgatni)
         val x0: Float; val y0: Float; val x1: Float; val y1: Float
         when (rotation) {
-            90 -> { x0 = t; y0 = bh - r; x1 = b; y1 = bh - l }
-            180 -> { x0 = bw - r; y0 = bh - b; x1 = bw - l; y1 = bh - t }
-            270 -> { x0 = bw - b; y0 = l; x1 = bw - t; y1 = r }
+            90 -> { x0 = t; y0 = ch - r; x1 = b; y1 = ch - l }
+            180 -> { x0 = cw - r; y0 = ch - b; x1 = cw - l; y1 = ch - t }
+            270 -> { x0 = cw - b; y0 = l; x1 = cw - t; y1 = r }
             else -> { x0 = l; y0 = t; x1 = r; y1 = b }
         }
-        val x = x0.toInt().coerceIn(0, bw - 1)
-        val y = y0.toInt().coerceIn(0, bh - 1)
-        val w = (x1.toInt() - x).coerceIn(1, bw - x)
-        val h = (y1.toInt() - y).coerceIn(1, bh - y)
+        val x = (vis.left + x0.toInt()).coerceIn(0, bw - 1)
+        val y = (vis.top + y0.toInt()).coerceIn(0, bh - 1)
+        val w = (x1.toInt() - x0.toInt()).coerceIn(1, bw - x)
+        val h = (y1.toInt() - y0.toInt()).coerceIn(1, bh - y)
         return Pair(Rect(x, y, x + w, y + h), CropMap(l, t, scale, offX, offY))
     }
 
     /** Csak a kijelölt sávot másolja ki a kameraképből (gyors, nagy felbontásnál is). */
     private fun extractCrop(proxy: ImageProxy, rotation: Int): Pair<Bitmap, CropMap>? {
-        val (rect, map) = cropRectInBuffer(proxy.width, proxy.height, rotation) ?: return null
+        val (rect, map) = cropRectInBuffer(proxy.width, proxy.height, rotation, proxy.cropRect) ?: return null
         val plane = proxy.planes[0]
         val buf = plane.buffer
         buf.rewind()
@@ -622,12 +644,15 @@ class MainActivity : AppCompatActivity() {
     private class Found(val text: String, val rect: RectF, val lineH: Float, val lines: Int, val bg: Int)
 
     /** Felismert szövegdoboz -> hely a képernyőn. */
-    private fun toViewRect(b: Rect, m: CropMap) = RectF(
-        m.offX + (m.l + b.left / m.enh) * m.scale,
-        m.offY + (m.t + b.top / m.enh) * m.scale,
-        m.offX + (m.l + b.right / m.enh) * m.scale,
-        m.offY + (m.t + b.bottom / m.enh) * m.scale
-    )
+    private fun toViewRect(b: Rect, m: CropMap): RectF {
+        val k = m.sample / m.enh   // felismert koordináta -> teljes felbontású kijelzett koordináta
+        return RectF(
+            m.offX + (m.l + b.left * k) * m.scale,
+            m.offY + (m.t + b.top * k) * m.scale,
+            m.offX + (m.l + b.right * k) * m.scale,
+            m.offY + (m.t + b.bottom * k) * m.scale
+        )
+    }
 
     /** Az eredeti szöveg körüli háttérszín (a doboz széle mentén mintavételezve). */
     private fun sampleBg(b: Rect, m: CropMap): Int {
@@ -660,7 +685,7 @@ class MainActivity : AppCompatActivity() {
                 val box = block.boundingBox
                 if (t.count { it.isLetter() } < 3 || box == null) null
                 else {
-                    val lineH = (block.lines.firstOrNull()?.boundingBox?.height() ?: box.height()) / map.enh * map.scale
+                    val lineH = (block.lines.firstOrNull()?.boundingBox?.height() ?: box.height()) * map.sample / map.enh * map.scale
                     Found(t, toViewRect(box, map), lineH, block.lines.size, sampleBg(box, map))
                 }
             }
