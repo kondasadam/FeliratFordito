@@ -55,15 +55,41 @@ class SettingsActivity : AppCompatActivity() {
         bindText(R.id.modelEdit, "geminiModel", Gemini.DEFAULT_MODEL)
         bindText(R.id.notesEdit, "gameNotes", "")
 
-        // Modell választó (a haladó mezőt is frissíti)
-        val modelEdit = findViewById<TextInputEditText>(R.id.modelEdit)
-        val modelGroup = findViewById<RadioGroup>(R.id.modelGroup)
-        val curModel = prefs.getString("geminiModel", Gemini.DEFAULT_MODEL).orEmpty()
-        if (curModel == "gemini-flash-latest") modelGroup.check(R.id.modelFlash)
-        else if (curModel == Gemini.DEFAULT_MODEL) modelGroup.check(R.id.modelLite)
-        modelGroup.setOnCheckedChangeListener { _, id ->
-            val m = if (id == R.id.modelFlash) "gemini-flash-latest" else Gemini.DEFAULT_MODEL
-            modelEdit.setText(m)   // a mező figyelője menti
+        // Fordítás minősége
+        val qualityGroup = findViewById<RadioGroup>(R.id.qualityGroup)
+        qualityGroup.check(
+            when (prefs.getString("quality", "pro")) {
+                "eco" -> R.id.qualityEco
+                "max" -> R.id.qualityMax
+                else -> R.id.qualityPro
+            }
+        )
+        qualityGroup.setOnCheckedChangeListener { _, id ->
+            val q = when (id) {
+                R.id.qualityEco -> "eco"
+                R.id.qualityMax -> "max"
+                else -> "pro"
+            }
+            prefs.edit().putString("quality", q).apply()
+            bump()
+        }
+        val profileSwitch = findViewById<MaterialSwitch>(R.id.profileSwitch)
+        profileSwitch.isChecked = prefs.getBoolean("useProfile", false)
+        profileSwitch.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean("useProfile", checked).apply()
+            bump()
+        }
+
+        // Fordítási memória
+        val memoryInfo = findViewById<TextView>(R.id.memoryInfo)
+        fun updateMemoryInfo() {
+            memoryInfo.text = "Fordítási memória: ${TranslationMemory.size(this)} megjegyzett szöveg (ezek ingyen és azonnal jelennek meg)."
+        }
+        updateMemoryInfo()
+        findViewById<Button>(R.id.memoryClearBtn).setOnClickListener {
+            TranslationMemory.clear(this)
+            updateMemoryInfo()
+            Toast.makeText(this, "Memória törölve", Toast.LENGTH_SHORT).show()
         }
 
         // Játékprofil

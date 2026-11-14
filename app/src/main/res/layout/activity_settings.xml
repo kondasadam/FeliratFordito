@@ -131,27 +131,56 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="16dp"
-                        android:text="Gemini modell"
+                        android:text="Fordítás minősége"
                         android:textColor="#FFFFFF"
                         android:textSize="16sp" />
 
                     <RadioGroup
-                        android:id="@+id/modelGroup"
+                        android:id="@+id/qualityGroup"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content">
 
                         <com.google.android.material.radiobutton.MaterialRadioButton
-                            android:id="@+id/modelLite"
+                            android:id="@+id/qualityEco"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:text="Flash-Lite – leggyorsabb, legolcsóbb" />
+                            android:text="Takarékos – a telefon olvas (kb. 5–20 Ft/óra)" />
 
                         <com.google.android.material.radiobutton.MaterialRadioButton
-                            android:id="@+id/modelFlash"
+                            android:id="@+id/qualityPro"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:text="Flash – pontosabb fordítás, kicsit drágább" />
+                            android:text="Profi – a Gemini nézi a képet (kb. 15–35 Ft/óra, ajánlott)" />
+
+                        <com.google.android.material.radiobutton.MaterialRadioButton
+                            android:id="@+id/qualityMax"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Csúcs – erősebb modell + kép (kb. 60–100 Ft/óra)" />
                     </RadioGroup>
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/profileSwitch"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="Játékprofil használata (pontosabb kifejezések, kb. +5–15 Ft/óra)" />
+
+                    <TextView
+                        android:id="@+id/memoryInfo"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:textColor="@color/text_dim"
+                        android:textSize="13sp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/memoryClearBtn"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Fordítási memória törlése" />
+
 
                     <com.google.android.material.textfield.TextInputLayout
                         style="@style/Widget.Material3.TextInputLayout.OutlinedBox"

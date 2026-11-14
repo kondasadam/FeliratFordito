@@ -93,6 +93,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var overlay: TranslationOverlayView
     private var arMode = true          // fordítás a felirat helyén (a képen)
     private var emptyReads = 0
+    private var pendingImg: Bitmap? = null   // a legutóbbi felirat képe (a Gemini ebből olvas Profi módban)
 
     /** A kivágott sáv helye a nézetben (a felismert szöveg visszavetítéséhez). */
     private class CropMap(val l: Float, val t: Float, val scale: Float, val offX: Float, val offY: Float) {
@@ -709,6 +710,7 @@ class MainActivity : AppCompatActivity() {
         lastSource = best
         sourceText.text = best
         lastTranslations = emptyList()
+        pendingImg = map.img
         overlay.setRects(rects, lineHeights, lineCounts, colors)
         if (recording && (recLines.isEmpty() || !similar(recLines.last(), best))) recLines.add(best)
         translateBlocks(finalBlocks)
@@ -791,6 +793,15 @@ class MainActivity : AppCompatActivity() {
         lines.forEach { recentHistory.addLast(displayText(it)) }
         while (recentHistory.size > 6) recentHistory.removeFirst()
 
+        // Fordítási memória: ha minden sort ismerünk, ingyen és azonnal kiírjuk
+        val mem = lines.map { TranslationMemory.get(this, it.body) }
+        if (mem.all { it != null }) {
+            geminiShownFor = key
+            showLines(lines, mem.map { it!! }, "memória")
+            busy.set(false)
+            return
+        }
+
         // Már lefordítottuk korábban?
         geminiCache[key]?.let { cached ->
             val parts = cached.split("\n")
@@ -858,13 +869,15 @@ class MainActivity : AppCompatActivity() {
         // 2) Gemini csak akkor, ha érdemes: van hosszabb mondat, és a felirat fél másodpercig kint marad.
         //    Egy feliratváltás = egyetlen kérés (a sorokat együtt küldjük), így kímélj a keretet.
         if (!useGemini() || (lines.size == 1 && wordCount(lines[0].body) <= 3)) return
+        val img = pendingImg
         mainHandler.postDelayed({
             if (key != lastSource) return@postDelayed   // közben jött új felirat: nem kérdezzük
             netExecutor.execute {
-                val tr = geminiTranslate(lines, history)
+                val tr = geminiTranslate(lines, history, img)
                 runOnUiThread {
                     if (tr != null) {
                         geminiCache[key] = tr.joinToString("\n")
+                        lines.forEachIndexed { i, ln -> TranslationMemory.put(this, ln.body, tr[i]) }
                         if (key == lastSource) {
                             geminiShownFor = key
                             showLines(lines, tr, "Gemini")
@@ -878,20 +891,40 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Egy feliratváltás összes sora egyetlen Gemini-kérésben. Hiba vagy rossz sorszám esetén null. */
-    private fun geminiTranslate(lines: List<Line>, history: List<String>): List<String>? {
+    /** Kép előkészítése a Geminihez: legfeljebb 768 px (egy képcsempe = kevés token), JPEG. */
+    private fun toJpeg(src: Bitmap): ByteArray {
+        val scale = minOf(1f, 768f / maxOf(src.width, src.height))
+        val bmp = if (scale < 1f)
+            Bitmap.createScaledBitmap(src, (src.width * scale).toInt().coerceAtLeast(1), (src.height * scale).toInt().coerceAtLeast(1), true)
+        else src
+        val out = java.io.ByteArrayOutputStream()
+        bmp.compress(Bitmap.CompressFormat.JPEG, 85, out)
+        return out.toByteArray()
+    }
+
+    private fun geminiTranslate(lines: List<Line>, history: List<String>, img: Bitmap?): List<String>? {
         val game = Gemini.game(this)
+        // Minőség: eco = csak szöveg; pro = Flash-Lite + kép; max = Flash + kép
+        val quality = prefs.getString("quality", "pro") ?: "pro"
+        val useImage = quality != "eco" && img != null
+        val model = if (quality == "max") "gemini-flash-latest" else Gemini.DEFAULT_MODEL
         val system = buildString {
             append("Videójáték-feliratokat fordítasz angolról magyarra.")
             if (game.isNotEmpty()) append(" A játék: $game.")
             append(" Természetes, gördülékeny, beszélt magyar nyelven fordíts, ne szó szerint.")
-            append(" A szöveg kamerás szövegfelismeréssel készült, lehetnek benne betűhibák: értelemszerűen javítsd őket.")
+            if (useImage) {
+                append(" Mellékelve a játék képernyőjének kivágása: ez az igazság. A telefon szövegfelismerője által")
+                append(" olvasott sorok hibásak lehetnek – a képről olvasd el pontosan, mi áll ott, és azt fordítsd.")
+            } else {
+                append(" A szöveg kamerás szövegfelismeréssel készült, lehetnek benne betűhibák: értelemszerűen javítsd őket.")
+            }
             append(" A személyneveket, helyneveket és a játék saját kifejezéseit hagyd eredetiben,")
             append(" kivéve ha a játék magyar változatában bevett fordításuk van.")
             append(" Ha menüpontokat vagy rövid feliratokat kapsz, a magyar játékokban szokásos rövid menüneveket használd")
             append(" (pl. Gear = Felszerelés, Inventory = Készlet, Map = Térkép, Quests = Küldetések).")
             append(" Pontosan annyi sort adj vissza, ahány sort kaptál, ugyanabban a sorrendben, sorszám nélkül.")
             append(" Csak a fordítást írd, magyarázat, idézőjel és a beszélő neve nélkül.")
-            val profile = GameProfiles.current(this@MainActivity)
+            val profile = if (prefs.getBoolean("useProfile", false)) GameProfiles.current(this@MainActivity) else ""
             if (profile.isNotEmpty()) {
                 append("\n\nHáttér a játékról és KÖTELEZŐ szójegyzék (a nevek és kifejezések fordításánál ezt kövesd):\n")
                 append(profile)
@@ -903,13 +936,14 @@ class MainActivity : AppCompatActivity() {
                 history.forEach { append("- ").append(it).append('\n') }
                 append('\n')
             }
-            append("Fordítandó sorok (${lines.size} db):\n")
+            append(if (useImage) "A felismerő által olvasott sorok (${lines.size} db, a képen ellenőrizd):\n" else "Fordítandó sorok (${lines.size} db):\n")
             lines.forEach { ln ->
                 if (ln.speaker != null) append("[").append(ln.speaker).append("] ")
                 append(ln.body).append('\n')
             }
         }
-        val text = Gemini.generate(this, system, user, 500, 6000) ?: return null
+        val jpeg = if (useImage) toJpeg(img!!) else null
+        val text = Gemini.generate(this, system, user, 500, 7000, modelOverride = model, imageJpeg = jpeg) ?: return null
         var out = text.split('\n').map { it.trim() }.filter { it.isNotEmpty() }
             .map { it.replace(Regex("^(\\d+[.)]\\s*|-\\s+|\\[[^\\]]*\\]\\s*)"), "").trim('"', '„', '”') }
         if (lines.size == 1 && out.size > 1) out = listOf(out.joinToString(" "))

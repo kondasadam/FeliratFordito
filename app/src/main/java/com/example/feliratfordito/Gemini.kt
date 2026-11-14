@@ -19,7 +19,10 @@ object Gemini {
     fun game(ctx: Context): String = prefs(ctx).getString("game", "").orEmpty().trim()
 
     /** Szöveg generálása. Hiba esetén null, az ok a [lastError]-ban. */
-    fun generate(ctx: Context, system: String, user: String, maxTokens: Int, timeoutMs: Int, modelOverride: String? = null): String? {
+    fun generate(
+        ctx: Context, system: String, user: String, maxTokens: Int, timeoutMs: Int,
+        modelOverride: String? = null, imageJpeg: ByteArray? = null
+    ): String? {
         val key = apiKey(ctx)
         if (key.isEmpty()) {
             lastError = "nincs API-kulcs"
@@ -38,7 +41,18 @@ object Gemini {
                 .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
                 .put(
                     "contents", JSONArray().put(
-                        JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", user)))
+                        JSONObject().put("role", "user").put("parts", JSONArray().apply {
+                            if (imageJpeg != null) {
+                                put(
+                                    JSONObject().put(
+                                        "inlineData", JSONObject()
+                                            .put("mimeType", "image/jpeg")
+                                            .put("data", android.util.Base64.encodeToString(imageJpeg, android.util.Base64.NO_WRAP))
+                                    )
+                                )
+                            }
+                            put(JSONObject().put("text", user))
+                        })
                     )
                 )
                 .put("generationConfig", gen)
