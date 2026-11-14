@@ -19,6 +19,12 @@ import android.util.TypedValue
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
+import android.widget.ScrollView
+import androidx.appcompat.app.AlertDialog
 import android.widget.SeekBar
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
@@ -60,6 +66,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * (ML Kit, a telefonon), és offline lefordítja magyarra (ML Kit Translate).
  */
 class MainActivity : AppCompatActivity() {
+
+    companion object {
+        const val DEFAULT_MODEL = "gemini-flash-lite-latest"
+    }
 
     private lateinit var previewView: PreviewView
     private lateinit var boxView: SubtitleBoxView
@@ -116,6 +126,7 @@ class MainActivity : AppCompatActivity() {
         zoomBar = findViewById(R.id.zoomBar)
         updateBtn = findViewById(R.id.updateBtn)
         updateBtn.setOnClickListener { startUpdate() }
+        findViewById<Button>(R.id.settingsBtn).setOnClickListener { openSettings() }
         statusText.setOnClickListener { if (translatorReady) statusText.visibility = View.GONE }
 
         // Mentett beállítások
@@ -439,16 +450,182 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val recentHistory = ArrayDeque<String>()   // utolsó feliratok a Gemini-nek (háttér)
+    @Volatile private var geminiPausedUntil = 0L
+    @Volatile private var lastGeminiError = ""
+
+    private fun displayText(ln: Line) = ln.speaker?.let { "$it: ${ln.body}" } ?: ln.body
+
+    private fun useGemini(): Boolean =
+        prefs.getString("engine", "gemini") == "gemini" &&
+            !prefs.getString("geminiKey", "").isNullOrBlank()
+
     private fun requestOnline(lines: List<Line>, cached: List<String?>, key: String) {
+        val history = recentHistory.toList()
+        lines.forEach { recentHistory.addLast(displayText(it)) }
+        while (recentHistory.size > 4) recentHistory.removeFirst()
+
         netExecutor.execute {
-            val out = lines.indices.map { i -> cached[i] ?: googleTranslate(lines[i].body) }
+            var engine = ""
+            val out = lines.indices.map { i ->
+                cached[i] ?: run {
+                    val g = if (useGemini()) geminiTranslate(lines[i].body, lines[i].speaker, history) else null
+                    if (g != null) {
+                        engine = "Gemini"
+                        g
+                    } else {
+                        if (engine.isEmpty()) engine = if (useGemini()) "Google (Gemini hiba: $lastGeminiError)" else "Google"
+                        googleTranslate(lines[i].body)
+                    }
+                }
+            }
             if (out.any { it == null }) return@execute   // nincs internet: marad az offline
             runOnUiThread {
                 lines.forEachIndexed { i, ln -> onlineCache[ln.body] = out[i]!! }
                 // csak akkor cseréljük, ha közben nem jött új felirat
-                if (key == lastSource) showLines(lines, out.map { it!! }, online = true)
+                if (key == lastSource) {
+                    showLines(lines, out.map { it!! }, online = true)
+                    if (engine.isNotEmpty()) sourceText.text = "$key   [$engine]"
+                }
             }
         }
+    }
+
+    /** Gemini fordítás a játék és az előző feliratok ismeretében. Hiba esetén null (-> Google). */
+    private fun geminiTranslate(body: String, speaker: String?, history: List<String>): String? {
+        val apiKey = prefs.getString("geminiKey", "").orEmpty().trim()
+        if (apiKey.isEmpty() || System.currentTimeMillis() < geminiPausedUntil) {
+            if (apiKey.isNotEmpty()) lastGeminiError = "napi/percenkénti keret"
+            return null
+        }
+        val model = prefs.getString("geminiModel", DEFAULT_MODEL).orEmpty().trim().ifEmpty { DEFAULT_MODEL }
+        val game = prefs.getString("game", "").orEmpty().trim()
+
+        val sys = buildString {
+            append("Videójáték-feliratokat fordítasz angolról magyarra.")
+            if (game.isNotEmpty()) append(" A játék: $game.")
+            append(" Természetes, gördülékeny, beszélt magyar nyelven fordíts, ne szó szerint.")
+            append(" A szöveg kamerás szövegfelismeréssel készült, lehetnek benne betűhibák: értelemszerűen javítsd őket.")
+            append(" A személyneveket, helyneveket és a játék saját kifejezéseit hagyd eredetiben,")
+            append(" kivéve ha a játék magyar változatában bevett fordításuk van.")
+            append(" Csak a fordított feliratot írd ki, magyarázat, idézőjel és a beszélő neve nélkül.")
+        }
+        val user = buildString {
+            if (history.isNotEmpty()) {
+                append("Előző feliratok (csak háttér, ne fordítsd le):\n")
+                history.forEach { append("- ").append(it).append('\n') }
+                append('\n')
+            }
+            if (speaker != null) append("Beszélő: ").append(speaker).append('\n')
+            append("Fordítandó felirat:\n").append(body)
+        }
+
+        for (attempt in 0..1) {
+            val gen = JSONObject().put("temperature", 0.2).put("maxOutputTokens", 400)
+            if (attempt == 0) gen.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+            val req = JSONObject()
+                .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", sys))))
+                .put("contents", JSONArray().put(
+                    JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", user)))
+                ))
+                .put("generationConfig", gen)
+            try {
+                val c = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
+                    .openConnection() as HttpURLConnection
+                c.requestMethod = "POST"
+                c.doOutput = true
+                c.connectTimeout = 4000
+                c.readTimeout = 6000
+                c.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                c.setRequestProperty("x-goog-api-key", apiKey)
+                c.outputStream.use { it.write(req.toString().toByteArray(Charsets.UTF_8)) }
+                val code = c.responseCode
+                if (code == 200) {
+                    val json = JSONObject(c.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() })
+                    c.disconnect()
+                    val parts = json.optJSONArray("candidates")?.optJSONObject(0)
+                        ?.optJSONObject("content")?.optJSONArray("parts") ?: return null
+                    val sb = StringBuilder()
+                    for (i in 0 until parts.length()) {
+                        val part = parts.optJSONObject(i) ?: continue
+                        if (part.optBoolean("thought", false)) continue
+                        sb.append(part.optString("text", ""))
+                    }
+                    lastGeminiError = ""
+                    return sb.toString().trim().trim('"', '„', '”').ifEmpty { null }
+                }
+                c.errorStream?.close()
+                c.disconnect()
+                if (code == 400 && attempt == 0) continue   // pl. a modell nem ismeri a thinkingConfig-ot
+                lastGeminiError = when (code) {
+                    400, 401, 403 -> "rossz kulcs? ($code)"
+                    404 -> "ismeretlen modell"
+                    429 -> "keret elfogyott"
+                    else -> "$code"
+                }
+                if (code == 429) geminiPausedUntil = System.currentTimeMillis() + 60_000
+                return null
+            } catch (e: Exception) {
+                lastGeminiError = "időtúllépés"
+                return null
+            }
+        }
+        return null
+    }
+
+    private fun openSettings() {
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, 0)
+        }
+        val rGemini = RadioButton(this).apply { id = View.generateViewId(); text = "Gemini (pontosabb, kulcs kell)" }
+        val rGoogle = RadioButton(this).apply { id = View.generateViewId(); text = "Google Fordító" }
+        val group = RadioGroup(this).apply { addView(rGemini); addView(rGoogle) }
+        group.check(if (prefs.getString("engine", "gemini") == "google") rGoogle.id else rGemini.id)
+
+        val keyEdit = EditText(this).apply {
+            hint = "Gemini API-kulcs (másold be)"
+            isSingleLine = true
+            setText(prefs.getString("geminiKey", ""))
+        }
+        val help = TextView(this).apply {
+            text = "Ingyenes kulcs: aistudio.google.com → Get API key"
+            textSize = 12f
+        }
+        val gameEdit = EditText(this).apply {
+            hint = "Játék neve (pl. Hogwarts Legacy)"
+            isSingleLine = true
+            setText(prefs.getString("game", ""))
+        }
+        val modelLabel = TextView(this).apply {
+            text = "Gemini modell (haladó, hagyd így)"
+            textSize = 12f
+            setPadding(0, pad / 2, 0, 0)
+        }
+        val modelEdit = EditText(this).apply {
+            isSingleLine = true
+            setText(prefs.getString("geminiModel", DEFAULT_MODEL))
+        }
+        listOf(group, keyEdit, help, gameEdit, modelLabel, modelEdit).forEach { box.addView(it) }
+
+        AlertDialog.Builder(this)
+            .setTitle("Fordítás beállításai")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Mentés") { _, _ ->
+                prefs.edit()
+                    .putString("engine", if (group.checkedRadioButtonId == rGoogle.id) "google" else "gemini")
+                    .putString("geminiKey", keyEdit.text.toString().trim())
+                    .putString("game", gameEdit.text.toString().trim())
+                    .putString("geminiModel", modelEdit.text.toString().trim().ifEmpty { DEFAULT_MODEL })
+                    .apply()
+                onlineCache.clear()
+                geminiPausedUntil = 0L
+                lastGeminiError = ""
+                lastSource = ""   // a következő feliratot újrafordítja
+            }
+            .setNegativeButton("Mégse", null)
+            .show()
     }
 
     /** Google Fordító (online, kulcs nélkül). Hiba vagy internet hiánya esetén null. */
