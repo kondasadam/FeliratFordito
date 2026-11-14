@@ -21,6 +21,7 @@ class SummaryActivity : AppCompatActivity() {
 
     private lateinit var list: LinearLayout
     private val bodies = HashMap<Long, TextView>()
+    private var filterGame = -1L   // csak ennek a játéknak a felvételei (-1 = mind)
     private val dateFmt = SimpleDateFormat("yyyy.MM.dd. HH:mm", Locale("hu"))
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
@@ -28,7 +29,10 @@ class SummaryActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_summary)
-        findViewById<MaterialToolbar>(R.id.toolbar).setNavigationOnClickListener { finish() }
+        val toolbar = findViewById<MaterialToolbar>(R.id.toolbar)
+        toolbar.setNavigationOnClickListener { finish() }
+        filterGame = intent.getLongExtra("gameId", -1L)
+        GameStore.find(this, filterGame)?.let { toolbar.title = "Felvételek – ${it.name}" }
         list = findViewById(R.id.list)
         render()
 
@@ -52,8 +56,19 @@ class SummaryActivity : AppCompatActivity() {
             return
         }
 
+        var shown = 0
         for (i in arr.length() - 1 downTo 0) {
-            addCard(arr.getJSONObject(i))
+            val sObj = arr.getJSONObject(i)
+            if (filterGame > 0 && sObj.optLong("gameId", -1L) != filterGame) continue
+            addCard(sObj)
+            shown++
+        }
+        if (shown == 0) {
+            list.addView(TextView(this).apply {
+                text = "Ehhez a játékhoz még nincs felvétel."
+                setTextColor(Color.LTGRAY)
+                textSize = 16f
+            })
         }
     }
 
@@ -140,7 +155,7 @@ class SummaryActivity : AppCompatActivity() {
             append(" döntés vagy feladat (küldetés, cél, helyszín) hangzott el. Rövid pontokba szedve, közérthetően.")
             append(" Ha volt választási lehetőség a párbeszédben, azt is említsd meg. A neveket hagyd eredetiben.")
             append(" Csak az összefoglalót írd, bevezető nélkül.")
-            val profile = if (getSharedPreferences("beallitasok", MODE_PRIVATE).getBoolean("useProfile", false)) GameProfiles.current(this@SummaryActivity) else ""
+            val profile = GameProfiles.forGame(GameStore.find(this@SummaryActivity, s.optLong("gameId", -1L)))
             if (profile.isNotEmpty()) append("\n\nHáttér a játékról és szójegyzék:\n").append(profile)
         }
 

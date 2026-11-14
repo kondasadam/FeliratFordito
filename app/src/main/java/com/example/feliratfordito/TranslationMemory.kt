@@ -6,7 +6,7 @@ import java.io.File
 import java.util.concurrent.Executors
 
 /**
- * Fordítási memória: a Gemini fordításait megjegyzi a telefonon.
+ * Fordítási memória játékonként: a Gemini fordításait megjegyzi a telefonon.
  * Ha ugyanaz a szöveg újra előjön (menük, ismétlődő párbeszéd), ingyen és azonnal kiírja.
  */
 object TranslationMemory {
@@ -14,24 +14,26 @@ object TranslationMemory {
     private val map = object : LinkedHashMap<String, String>(256, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) = size > MAX
     }
-    private var loaded = false
+    private var loadedFor = Long.MIN_VALUE
     private val io = Executors.newSingleThreadExecutor()
-    @Volatile private var savePending = false
 
-    private fun file(ctx: Context) = File(ctx.filesDir, "forditasi_memoria.json")
+    private fun file(ctx: Context, gameId: Long) = File(ctx.filesDir, "memoria_$gameId.json")
+    private fun activeId(ctx: Context) = GameStore.active(ctx)?.id ?: 0L
 
-    /** Kulcs: kisbetűs, csak betűk és számok – így az apró felismerési eltérések (írásjelek, szóközök) nem számítanak. */
+    /** Kulcs: kisbetűs, csak betűk és számok – az apró felismerési eltérések nem számítanak. */
     fun key(s: String) = s.lowercase().filter { it.isLetterOrDigit() }
 
     @Synchronized
     private fun ensureLoaded(ctx: Context) {
-        if (loaded) return
-        loaded = true
+        val id = activeId(ctx)
+        if (loadedFor == id) return
+        map.clear()
+        loadedFor = id
         try {
-            val json = JSONObject(file(ctx).readText())
+            val json = JSONObject(file(ctx, id).readText())
             json.keys().forEach { k -> map[k] = json.getString(k) }
         } catch (e: Exception) {
-            // még nincs memória
+            // még nincs memória ehhez a játékhoz
         }
     }
 
@@ -49,32 +51,28 @@ object TranslationMemory {
         val k = key(text)
         if (k.length < 2 || translation.isBlank()) return
         map[k] = translation
-        scheduleSave(ctx.applicationContext)
-    }
-
-    @Synchronized
-    fun size(ctx: Context): Int {
-        ensureLoaded(ctx)
-        return map.size
-    }
-
-    @Synchronized
-    fun clear(ctx: Context) {
-        ensureLoaded(ctx)
-        map.clear()
-        scheduleSave(ctx.applicationContext)
-    }
-
-    private fun scheduleSave(ctx: Context) {
-        if (savePending) return
-        savePending = true
+        val id = loadedFor
+        val snapshot = JSONObject(map as Map<*, *>).toString()
+        val f = file(ctx.applicationContext, id)
         io.execute {
-            Thread.sleep(2000)   // több változást egyszerre mentünk
-            savePending = false
-            val snapshot = synchronized(this) { JSONObject(map as Map<*, *>).toString() }
-            try {
-                file(ctx).writeText(snapshot)
-            } catch (e: Exception) { }
+            try { f.writeText(snapshot) } catch (e: Exception) { }
         }
+    }
+
+    /** Hány szöveget jegyzett meg egy játékhoz. */
+    @Synchronized
+    fun countFor(ctx: Context, gameId: Long): Int {
+        if (gameId == loadedFor) return map.size
+        return try {
+            JSONObject(file(ctx, gameId).readText()).length()
+        } catch (e: Exception) {
+            0
+        }
+    }
+
+    @Synchronized
+    fun clearFor(ctx: Context, gameId: Long) {
+        if (gameId == loadedFor) map.clear()
+        file(ctx, gameId).delete()
     }
 }

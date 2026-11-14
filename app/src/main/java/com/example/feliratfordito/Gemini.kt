@@ -16,7 +16,7 @@ object Gemini {
     private fun prefs(ctx: Context) = ctx.getSharedPreferences("beallitasok", Context.MODE_PRIVATE)
 
     fun apiKey(ctx: Context): String = prefs(ctx).getString("geminiKey", "").orEmpty().trim()
-    fun game(ctx: Context): String = prefs(ctx).getString("game", "").orEmpty().trim()
+    fun game(ctx: Context): String = GameStore.active(ctx)?.name.orEmpty()
 
     /** Szöveg generálása. Hiba esetén null, az ok a [lastError]-ban. */
     fun generate(

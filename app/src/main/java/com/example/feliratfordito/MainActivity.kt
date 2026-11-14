@@ -325,6 +325,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyDisplayPrefs() {
+        val gname = Gemini.game(this)
+        findViewById<TextView>(R.id.gameLabel).apply {
+            text = "🎮 $gname"
+            visibility = if (gname.isEmpty()) View.GONE else View.VISIBLE
+        }
         arMode = prefs.getString("displayMode", "ar") == "ar"
         overlay.visibility = if (arMode) View.VISIBLE else View.GONE
         translationCard.visibility = if (arMode) View.GONE else View.VISIBLE
@@ -924,7 +929,7 @@ class MainActivity : AppCompatActivity() {
             append(" (pl. Gear = Felszerelés, Inventory = Készlet, Map = Térkép, Quests = Küldetések).")
             append(" Pontosan annyi sort adj vissza, ahány sort kaptál, ugyanabban a sorrendben, sorszám nélkül.")
             append(" Csak a fordítást írd, magyarázat, idézőjel és a beszélő neve nélkül.")
-            val profile = if (prefs.getBoolean("useProfile", false)) GameProfiles.current(this@MainActivity) else ""
+            val profile = GameProfiles.current(this@MainActivity)
             if (profile.isNotEmpty()) {
                 append("\n\nHáttér a játékról és KÖTELEZŐ szójegyzék (a nevek és kifejezések fordításánál ezt kövesd):\n")
                 append(profile)
@@ -1026,10 +1031,12 @@ class MainActivity : AppCompatActivity() {
                 .put("start", recStart)
                 .put("end", id)
                 .put("game", Gemini.game(this))
+                .put("gameId", GameStore.active(this)?.id ?: 0L)
                 .put("lines", arr)
                 .put("summary", "")
             SessionStore.add(this, session)
             val intent = Intent(this, SummaryActivity::class.java)
+                .putExtra("gameId", GameStore.active(this)?.id ?: -1L)
             if (Gemini.apiKey(this).isNotEmpty()) intent.putExtra("autoSummarize", id)
             startActivity(intent)
         }

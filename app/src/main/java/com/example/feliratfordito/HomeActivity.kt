@@ -6,7 +6,9 @@ import android.os.Bundle
 import android.view.View
 import android.widget.Button
 import android.widget.ImageView
+import android.widget.EditText
 import android.widget.LinearLayout
+import androidx.appcompat.app.AlertDialog
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.bottomsheet.BottomSheetDialog
@@ -24,24 +26,28 @@ class HomeActivity : AppCompatActivity() {
 
         findViewById<View>(R.id.startBtn).setOnClickListener { openTranslator() }
 
-        tile(R.id.tileLive, R.drawable.ic_camera, "Élő fordítás", "Irányítsd a kamerát a tévére") { openTranslator() }
+        tile(R.id.tileLive, R.drawable.ic_add, "Új játék", "Saját profil és memória") { newGameDialog() }
         tile(R.id.tileRecordings, R.drawable.ic_notes, "Összefoglalók", "Felvett beszélgetések") {
             startActivity(Intent(this, SummaryActivity::class.java))
         }
         tile(R.id.tileSettings, R.drawable.ic_settings, "Beállítások", "Fordító, játék, megjelenés") { openSettings() }
         tile(R.id.tileHelp, R.drawable.ic_help, "Hogyan működik?", "Rövid útmutató") { showHelp() }
 
-        feature(R.id.feat1, R.drawable.ic_bolt, "Azonnali fordítás",
-            "Fél másodperc alatt megjelenik a magyar szöveg")
-        feature(R.id.feat2, R.drawable.ic_brain, "Érti a jelenetet",
-            "A Gemini ismeri a játékot és az előzményeket, a neveket nem fordítja le")
-        feature(R.id.feat3, R.drawable.ic_notes, "Beszélgetés-összefoglaló",
+        feature(R.id.feat1, R.drawable.ic_brain, "A Gemini a képről olvas",
+            "Elolvassa és lefordítja a feliratot, érti a jelenetet és a játékot")
+        feature(R.id.feat2, R.drawable.ic_bolt, "Fordítási memória",
+            "Amit egyszer lefordított, azt legközelebb ingyen és azonnal mutatja")
+        feature(R.id.feat3, R.drawable.ic_gamepad, "Játékonként külön",
+            "Minden játéknak saját profilja, memóriája és felvételei vannak")
+        feature(R.id.feat4, R.drawable.ic_notes, "Beszélgetés-összefoglaló",
             "Vedd fel a párbeszédet, és kérj róla magyar összefoglalót")
-        feature(R.id.feat4, R.drawable.ic_offline, "Internet nélkül is megy",
-            "Offline is fordít, internettel pontosabban")
 
         findViewById<Chip>(R.id.engineChip).setOnClickListener { openSettings() }
-        findViewById<Chip>(R.id.gameChip).setOnClickListener { openSettings() }
+        findViewById<Chip>(R.id.gameChip).setOnClickListener {
+            val g = GameStore.active(this)
+            if (g != null) openGame(g.id) else newGameDialog()
+        }
+        findViewById<View>(R.id.addGameBtn).setOnClickListener { newGameDialog() }
 
         val updateCard = findViewById<View>(R.id.updateCard)
         val updateBtn = findViewById<Button>(R.id.updateBtn)
@@ -79,13 +85,80 @@ class HomeActivity : AppCompatActivity() {
             setTextColor(if (gemini) Color.rgb(129, 199, 132) else Color.rgb(255, 213, 79))
         }
         val game = Gemini.game(this)
-        findViewById<Chip>(R.id.gameChip).text = if (game.isNotEmpty()) "🎮 $game" else "🎮 Játék megadása"
+        findViewById<Chip>(R.id.gameChip).text = if (game.isNotEmpty()) "🎮 $game" else "🎮 Játék hozzáadása"
+        renderGames()
 
         val n = SessionStore.load(this).length()
         tileDesc(R.id.tileRecordings, if (n == 0) "Még nincs felvétel" else "$n felvett beszélgetés")
     }
 
-    private fun openTranslator() = startActivity(Intent(this, MainActivity::class.java))
+    /** Fordítás indítása a legutóbbi játékkal (ha még nincs játék, előbb felvesszük). */
+    private fun openTranslator() {
+        val g = GameStore.active(this)
+        if (g == null) {
+            newGameDialog(startAfter = true)
+        } else {
+            GameStore.setActive(this, g.id)
+            startActivity(Intent(this, MainActivity::class.java))
+        }
+    }
+
+    private fun openGame(id: Long) = startActivity(Intent(this, GameActivity::class.java).putExtra("gameId", id))
+
+    private fun newGameDialog(startAfter: Boolean = false) {
+        val pad = (20 * resources.displayMetrics.density).toInt()
+        val edit = EditText(this).apply {
+            hint = "pl. Hogwarts Legacy"
+            isSingleLine = true
+        }
+        val box = LinearLayout(this).apply {
+            setPadding(pad, pad / 2, pad, 0)
+            addView(edit, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Új játék")
+            .setMessage("Melyik játékot fordítsuk?")
+            .setView(box)
+            .setPositiveButton(if (startAfter) "Indítás" else "Hozzáadás") { _, _ ->
+                val name = edit.text.toString().trim()
+                if (name.isEmpty()) return@setPositiveButton
+                val g = GameStore.add(this, name)
+                GameStore.setActive(this, g.id)
+                if (startAfter) startActivity(Intent(this, MainActivity::class.java)) else openGame(g.id)
+            }
+            .setNegativeButton("Mégse", null)
+            .show()
+    }
+
+    private fun renderGames() {
+        val list = findViewById<LinearLayout>(R.id.gamesList)
+        list.removeAllViews()
+        val games = GameStore.sorted(this)
+        val sessions = SessionStore.load(this)
+        if (games.isEmpty()) {
+            list.addView(TextView(this).apply {
+                text = "Még nincs játékod. Add hozzá az elsőt a „+ Új játék” gombbal – minden játéknak saját fordítási memóriája és felvételei lesznek."
+                setTextColor(Color.rgb(168, 176, 186))
+                textSize = 14f
+            })
+            return
+        }
+        for (g in games) {
+            val v = layoutInflater.inflate(R.layout.item_game, list, false)
+            var recs = 0
+            for (i in 0 until sessions.length()) if (sessions.getJSONObject(i).optLong("gameId", -1L) == g.id) recs++
+            val mem = TranslationMemory.countFor(this, g.id)
+            v.findViewById<TextView>(R.id.gameAvatar).text = g.name.firstOrNull()?.uppercase() ?: "?"
+            v.findViewById<TextView>(R.id.gameName).text = g.name
+            v.findViewById<TextView>(R.id.gameInfo).text = "$recs felvétel · $mem megjegyzett szöveg"
+            v.setOnClickListener { openGame(g.id) }
+            v.findViewById<View>(R.id.gamePlay).setOnClickListener {
+                GameStore.setActive(this, g.id)
+                startActivity(Intent(this, MainActivity::class.java))
+            }
+            list.addView(v)
+        }
+    }
     private fun openSettings() = startActivity(Intent(this, SettingsActivity::class.java))
 
     private fun tile(id: Int, icon: Int, title: String, desc: String, onClick: () -> Unit) {
@@ -125,7 +198,7 @@ class HomeActivity : AppCompatActivity() {
             "Húzd a sárga keretet a felirat helyére. Dupla koppintás a kereten: alaphelyzet.",
             "A magyar szöveg az angol felirat helyén jelenik meg a képen. (A Beállításokban kérhetsz külön kártyát is.)",
             "Beszélgetés elején nyomd meg a piros gombot, a végén újra: kapsz egy összefoglalót.",
-            "Pontosabb fordításhoz add meg a Gemini-kulcsot és a játék nevét a Beállításokban."
+            "Minden játékot külön vegyél fel: saját fordítási memóriája, profilja és felvételei lesznek. A Gemini-kulcsot a Beállításokban add meg."
         )
         steps.forEachIndexed { i, s ->
             box.addView(TextView(this).apply {

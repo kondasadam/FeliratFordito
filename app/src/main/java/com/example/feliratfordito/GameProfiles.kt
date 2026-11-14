@@ -32,13 +32,15 @@ Megszólítás: a diákok egymást tegezik; a tanárokat a diák magázza.
         }
     }
 
-    /** A fordításhoz használt profil: a saját (szerkesztett) jegyzet, vagy ha az üres, a beépített. */
-    fun current(ctx: Context): String {
-        val prefs = ctx.getSharedPreferences("beallitasok", Context.MODE_PRIVATE)
-        val notes = prefs.getString("gameNotes", "").orEmpty().trim()
+    /** A fordításhoz használt profil (csak ha a játéknál be van kapcsolva): saját jegyzet, vagy ha az üres, a beépített. */
+    fun forGame(game: GameStore.Game?): String {
+        if (game == null || !game.useProfile) return ""
+        val notes = game.notes.trim()
         if (notes.isNotEmpty()) return notes.take(5000)
-        return builtin(Gemini.game(ctx)).orEmpty()
+        return builtin(game.name).orEmpty()
     }
+
+    fun current(ctx: Context): String = forGame(GameStore.active(ctx))
 
     /** Profil készítése a Gemini tudásából bármely játékhoz (egyetlen kérés). */
     fun generate(ctx: Context, game: String): String? {
