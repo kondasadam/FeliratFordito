@@ -1,7 +1,15 @@
 package com.example.feliratfordito
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import androidx.core.content.FileProvider
+import androidx.core.content.pm.PackageInfoCompat
+import org.json.JSONObject
+import java.io.File
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.RectF
@@ -59,6 +67,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var sourceText: TextView
     private lateinit var statusText: TextView
     private lateinit var zoomBar: SeekBar
+    private lateinit var updateBtn: Button
 
     private var camera: Camera? = null
     private lateinit var analysisExecutor: ExecutorService
@@ -105,6 +114,9 @@ class MainActivity : AppCompatActivity() {
         sourceText = findViewById(R.id.sourceText)
         statusText = findViewById(R.id.statusText)
         zoomBar = findViewById(R.id.zoomBar)
+        updateBtn = findViewById(R.id.updateBtn)
+        updateBtn.setOnClickListener { startUpdate() }
+        statusText.setOnClickListener { if (translatorReady) statusText.visibility = View.GONE }
 
         // Mentett beállítások
         cropNorm = RectF(
@@ -165,6 +177,7 @@ class MainActivity : AppCompatActivity() {
             }
 
         analysisExecutor = Executors.newSingleThreadExecutor()
+        checkForUpdate()
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
@@ -488,6 +501,117 @@ class MainActivity : AppCompatActivity() {
             val tmp = prev; prev = cur; cur = tmp
         }
         return prev[b.length]
+    }
+
+    // ---------- Frissítés a GitHub-ról ----------
+
+    private val apkUrl = "https://github.com/kondasadam/FeliratFordito/releases/latest/download/FeliratFordito.apk"
+    private var downloading = false
+    private var downloadedApk: File? = null
+
+    private fun currentVersion(): Long = try {
+        PackageInfoCompat.getLongVersionCode(packageManager.getPackageInfo(packageName, 0))
+    } catch (e: Exception) {
+        0L
+    }
+
+    /** Indításkor megnézi, van-e újabb kiadás a GitHub-on. */
+    private fun checkForUpdate() {
+        Thread {
+            try {
+                val c = URL("https://api.github.com/repos/kondasadam/FeliratFordito/releases/latest")
+                    .openConnection() as HttpURLConnection
+                c.connectTimeout = 5000
+                c.readTimeout = 5000
+                c.setRequestProperty("Accept", "application/vnd.github+json")
+                if (c.responseCode == 200) {
+                    val json = JSONObject(c.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() })
+                    val latest = json.optString("tag_name").removePrefix("v").toLongOrNull() ?: 0L
+                    if (latest > currentVersion()) {
+                        runOnUiThread {
+                            updateBtn.text = "Frissítés elérhető"
+                            updateBtn.visibility = View.VISIBLE
+                        }
+                    }
+                }
+                c.disconnect()
+            } catch (e: Exception) {
+                // nincs internet: nincs frissítésjelzés
+            }
+        }.start()
+    }
+
+    private fun startUpdate() {
+        if (downloading) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+            showStatus("Engedélyezd az appnak a frissítések telepítését,\nmajd lépj vissza, és nyomd meg újra a Frissítés gombot.")
+            try {
+                startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+            } catch (e: Exception) { }
+            return
+        }
+        downloadedApk?.let { if (it.exists()) { installApk(it); return } }
+
+        downloading = true
+        if (translatorReady) statusText.visibility = View.GONE
+        updateBtn.text = "Letöltés…"
+        Thread {
+            val file = File(File(cacheDir, "updates").apply { mkdirs() }, "FeliratFordito.apk")
+            val ok = try {
+                val c = URL(apkUrl).openConnection() as HttpURLConnection
+                c.instanceFollowRedirects = true
+                c.connectTimeout = 15000
+                c.readTimeout = 30000
+                val total = c.contentLengthLong
+                c.inputStream.use { input ->
+                    file.outputStream().use { out ->
+                        val buf = ByteArray(64 * 1024)
+                        var done = 0L
+                        var lastPct = -1
+                        while (true) {
+                            val n = input.read(buf)
+                            if (n < 0) break
+                            out.write(buf, 0, n)
+                            done += n
+                            if (total > 0) {
+                                val pct = (done * 100 / total).toInt()
+                                if (pct != lastPct) {
+                                    lastPct = pct
+                                    runOnUiThread { updateBtn.text = "Letöltés $pct%" }
+                                }
+                            }
+                        }
+                    }
+                }
+                c.disconnect()
+                true
+            } catch (e: Exception) {
+                false
+            }
+            runOnUiThread {
+                downloading = false
+                if (ok) {
+                    downloadedApk = file
+                    updateBtn.text = "Telepítés"
+                    installApk(file)
+                } else {
+                    updateBtn.text = "Frissítés (újra)"
+                    showStatus("A frissítés letöltése nem sikerült. Ellenőrizd az internetet.")
+                }
+            }
+        }.start()
+    }
+
+    private fun installApk(file: File) {
+        try {
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+            val intent = Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, "application/vnd.android.package-archive")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+        } catch (e: Exception) {
+            showStatus("A telepítő nem indult el: ${e.message}")
+        }
     }
 
     override fun onDestroy() {
