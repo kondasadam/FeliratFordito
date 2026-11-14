@@ -1034,14 +1034,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Egy feliratváltás összes sora egyetlen Gemini-kérésben. Hiba vagy rossz sorszám esetén null. */
-    /** Kép előkészítése a Geminihez: legfeljebb 768 px (egy képcsempe = kevés token), JPEG. */
+    /** Kép előkészítése a Geminihez: legfeljebb 1536 px, hogy a kis és kézírásos betűk is olvashatók maradjanak. */
     private fun toJpeg(src: Bitmap): ByteArray {
-        val scale = minOf(1f, 768f / maxOf(src.width, src.height))
+        val scale = minOf(1f, 1536f / maxOf(src.width, src.height))
         val bmp = if (scale < 1f)
             Bitmap.createScaledBitmap(src, (src.width * scale).toInt().coerceAtLeast(1), (src.height * scale).toInt().coerceAtLeast(1), true)
         else src
         val out = java.io.ByteArrayOutputStream()
-        bmp.compress(Bitmap.CompressFormat.JPEG, 85, out)
+        bmp.compress(Bitmap.CompressFormat.JPEG, 90, out)
         return out.toByteArray()
     }
 
@@ -1056,8 +1056,11 @@ class MainActivity : AppCompatActivity() {
             if (game.isNotEmpty()) append(" A játék: $game.")
             append(" Természetes, gördülékeny, beszélt magyar nyelven fordíts, ne szó szerint.")
             if (useImage) {
-                append(" Mellékelve a játék képernyőjének kivágása: ez az igazság. A telefon szövegfelismerője által")
-                append(" olvasott sorok hibásak lehetnek – a képről olvasd el pontosan, mi áll ott, és azt fordítsd.")
+                append(" Mellékelve a játék képernyőjének kivágása (a tévéről készült fotó): EZ AZ IGAZSÁG.")
+                append(" Először olvasd el figyelmesen a képen látható angol szöveget (lehet dőlt vagy kézírásos betűtípus is), és azt fordítsd.")
+                append(" A telefon szövegfelismerője által olvasott sorokat csak a sorok szétválasztásához és sorrendjéhez használd,")
+                append(" a tartalmukban NE bízz: értelmetlen vagy nem létező szavakat (pl. 'NeNorY', 'Musclt') soha ne vegyél át,")
+                append(" hanem a képről olvasd el, mi áll ott valójában. Ha egy szót a képen sem tudsz kiolvasni, a mondat értelméből pótold.")
             } else {
                 append(" A szöveg kamerás szövegfelismeréssel készült, lehetnek benne betűhibák: értelemszerűen javítsd őket.")
             }
