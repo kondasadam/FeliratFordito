@@ -18,15 +18,28 @@
         android:orientation="horizontal"
         android:padding="14dp">
 
-        <TextView
-            android:id="@+id/gameAvatar"
-            android:layout_width="52dp"
-            android:layout_height="52dp"
-            android:background="@drawable/bg_avatar"
-            android:gravity="center"
-            android:textColor="#1A1300"
-            android:textSize="22sp"
-            android:textStyle="bold" />
+        <FrameLayout
+            android:layout_width="56dp"
+            android:layout_height="56dp">
+
+            <TextView
+                android:id="@+id/gameAvatar"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:background="@drawable/bg_avatar"
+                android:gravity="center"
+                android:textColor="#1A1300"
+                android:textSize="22sp"
+                android:textStyle="bold" />
+
+            <com.google.android.material.imageview.ShapeableImageView
+                android:id="@+id/gameImage"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:scaleType="centerCrop"
+                android:visibility="gone"
+                app:shapeAppearanceOverlay="@style/ShapeRounded16" />
+        </FrameLayout>
 
         <LinearLayout
             android:layout_width="0dp"

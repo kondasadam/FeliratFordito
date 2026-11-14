@@ -149,6 +149,12 @@ class HomeActivity : AppCompatActivity() {
             for (i in 0 until sessions.length()) if (sessions.getJSONObject(i).optLong("gameId", -1L) == g.id) recs++
             val mem = TranslationMemory.countFor(this, g.id)
             v.findViewById<TextView>(R.id.gameAvatar).text = g.name.firstOrNull()?.uppercase() ?: "?"
+            GameImages.load(this, g.id)?.let { bmp ->
+                v.findViewById<ImageView>(R.id.gameImage).apply {
+                    setImageBitmap(bmp)
+                    visibility = View.VISIBLE
+                }
+            }
             v.findViewById<TextView>(R.id.gameName).text = g.name
             v.findViewById<TextView>(R.id.gameInfo).text = "$recs felvétel · $mem megjegyzett szöveg"
             v.setOnClickListener { openGame(g.id) }

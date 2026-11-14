@@ -4,6 +4,9 @@ import android.content.Intent
 import android.os.Bundle
 import android.view.View
 import android.widget.Button
+import android.widget.ImageView
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
@@ -19,6 +22,14 @@ class GameActivity : AppCompatActivity() {
     private var gameId = -1L
     private lateinit var game: GameStore.Game
 
+    // Kép választása a galériából (rendszer képválasztó, nem kell hozzá engedély)
+    private val pickImage = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) {
+            if (GameImages.save(this, gameId, uri)) refreshImage()
+            else Toast.makeText(this, "Nem sikerült betölteni a képet", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_game)
@@ -32,6 +43,16 @@ class GameActivity : AppCompatActivity() {
 
         val toolbar = findViewById<MaterialToolbar>(R.id.toolbar)
         toolbar.setNavigationOnClickListener { finish() }
+
+        val pick = View.OnClickListener {
+            pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+        }
+        findViewById<View>(R.id.pickImageBtn).setOnClickListener(pick)
+        findViewById<View>(R.id.imageBox).setOnClickListener(pick)
+        findViewById<View>(R.id.removeImageBtn).setOnClickListener {
+            GameImages.delete(this, gameId)
+            refreshImage()
+        }
 
         findViewById<View>(R.id.startBtn).setOnClickListener {
             GameStore.setActive(this, gameId)
@@ -108,6 +129,7 @@ class GameActivity : AppCompatActivity() {
                 .setMessage("Törlöd a(z) „${game.name}” játékot? A fordítási memóriája is törlődik (a felvételek megmaradnak).")
                 .setPositiveButton("Törlés") { _, _ ->
                     GameStore.delete(this, gameId)
+                    GameImages.delete(this, gameId)
                     finish()
                 }
                 .setNegativeButton("Mégse", null)
@@ -116,6 +138,24 @@ class GameActivity : AppCompatActivity() {
 
         refreshHeader()
         updateProfileInfo()
+        refreshImage()
+    }
+
+    private fun refreshImage() {
+        val bmp = GameImages.load(this, gameId)
+        val img = findViewById<ImageView>(R.id.gameImage)
+        val letter = findViewById<TextView>(R.id.imageLetter)
+        letter.text = game.name.firstOrNull()?.uppercase() ?: "?"
+        if (bmp != null) {
+            img.setImageBitmap(bmp)
+            img.visibility = View.VISIBLE
+            letter.visibility = View.GONE
+        } else {
+            img.visibility = View.GONE
+            letter.visibility = View.VISIBLE
+        }
+        findViewById<View>(R.id.removeImageBtn).visibility = if (bmp != null) View.VISIBLE else View.GONE
+        findViewById<Button>(R.id.pickImageBtn).text = if (bmp != null) "Kép cseréje" else "Kép választása"
     }
 
     override fun onResume() {
