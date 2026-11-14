@@ -140,6 +140,8 @@ class SummaryActivity : AppCompatActivity() {
             append(" döntés vagy feladat (küldetés, cél, helyszín) hangzott el. Rövid pontokba szedve, közérthetően.")
             append(" Ha volt választási lehetőség a párbeszédben, azt is említsd meg. A neveket hagyd eredetiben.")
             append(" Csak az összefoglalót írd, bevezető nélkül.")
+            val profile = GameProfiles.current(this@SummaryActivity)
+            if (profile.isNotEmpty()) append("\n\nHáttér a játékról és szójegyzék:\n").append(profile)
         }
 
         body.text = "Összefoglaló készül…"

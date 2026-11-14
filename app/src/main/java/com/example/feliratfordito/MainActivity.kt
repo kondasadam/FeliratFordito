@@ -789,7 +789,7 @@ class MainActivity : AppCompatActivity() {
 
         val history = recentHistory.toList()
         lines.forEach { recentHistory.addLast(displayText(it)) }
-        while (recentHistory.size > 4) recentHistory.removeFirst()
+        while (recentHistory.size > 6) recentHistory.removeFirst()
 
         // Már lefordítottuk korábban?
         geminiCache[key]?.let { cached ->
@@ -891,6 +891,11 @@ class MainActivity : AppCompatActivity() {
             append(" (pl. Gear = Felszerelés, Inventory = Készlet, Map = Térkép, Quests = Küldetések).")
             append(" Pontosan annyi sort adj vissza, ahány sort kaptál, ugyanabban a sorrendben, sorszám nélkül.")
             append(" Csak a fordítást írd, magyarázat, idézőjel és a beszélő neve nélkül.")
+            val profile = GameProfiles.current(this@MainActivity)
+            if (profile.isNotEmpty()) {
+                append("\n\nHáttér a játékról és KÖTELEZŐ szójegyzék (a nevek és kifejezések fordításánál ezt kövesd):\n")
+                append(profile)
+            }
         }
         val user = buildString {
             if (history.isNotEmpty()) {

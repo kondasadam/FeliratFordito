@@ -98,6 +98,66 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="12dp"
+                        android:hint="Játékprofil: háttér és szójegyzék"
+                        app:helperText="A Gemini minden fordításnál megkapja. Üresen hagyva a beépített profil él (ha van).">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/notesEdit"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:gravity="top"
+                            android:inputType="textMultiLine|textCapSentences"
+                            android:maxLines="12"
+                            android:minLines="4"
+                            android:textSize="13sp" />
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/profileBtn"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="Profil készítése a játékhoz" />
+
+                    <TextView
+                        android:id="@+id/profileInfo"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:textColor="@color/text_dim"
+                        android:textSize="12sp" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="16dp"
+                        android:text="Gemini modell"
+                        android:textColor="#FFFFFF"
+                        android:textSize="16sp" />
+
+                    <RadioGroup
+                        android:id="@+id/modelGroup"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content">
+
+                        <com.google.android.material.radiobutton.MaterialRadioButton
+                            android:id="@+id/modelLite"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Flash-Lite – leggyorsabb, legolcsóbb" />
+
+                        <com.google.android.material.radiobutton.MaterialRadioButton
+                            android:id="@+id/modelFlash"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Flash – pontosabb fordítás, kicsit drágább" />
+                    </RadioGroup>
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
                         android:hint="Gemini modell (haladó)"
                         app:helperText="Hagyd így, ha nem tudod, mi ez">
 

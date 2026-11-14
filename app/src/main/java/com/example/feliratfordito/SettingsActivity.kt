@@ -53,6 +53,61 @@ class SettingsActivity : AppCompatActivity() {
         bindText(R.id.keyEdit, "geminiKey", "")
         bindText(R.id.gameEdit, "game", "")
         bindText(R.id.modelEdit, "geminiModel", Gemini.DEFAULT_MODEL)
+        bindText(R.id.notesEdit, "gameNotes", "")
+
+        // Modell választó (a haladó mezőt is frissíti)
+        val modelEdit = findViewById<TextInputEditText>(R.id.modelEdit)
+        val modelGroup = findViewById<RadioGroup>(R.id.modelGroup)
+        val curModel = prefs.getString("geminiModel", Gemini.DEFAULT_MODEL).orEmpty()
+        if (curModel == "gemini-flash-latest") modelGroup.check(R.id.modelFlash)
+        else if (curModel == Gemini.DEFAULT_MODEL) modelGroup.check(R.id.modelLite)
+        modelGroup.setOnCheckedChangeListener { _, id ->
+            val m = if (id == R.id.modelFlash) "gemini-flash-latest" else Gemini.DEFAULT_MODEL
+            modelEdit.setText(m)   // a mező figyelője menti
+        }
+
+        // Játékprofil
+        val notesEdit = findViewById<TextInputEditText>(R.id.notesEdit)
+        val profileInfo = findViewById<TextView>(R.id.profileInfo)
+        fun updateProfileInfo() {
+            val game = Gemini.game(this)
+            profileInfo.text = when {
+                prefs.getString("gameNotes", "").orEmpty().isNotBlank() -> "Saját profil használatban."
+                GameProfiles.builtin(game) != null -> "Beépített profil használatban ($game)."
+                game.isEmpty() -> "Add meg a játék nevét, majd készíts profilt."
+                else -> "Nincs profil – nyomd meg a gombot."
+            }
+        }
+        updateProfileInfo()
+        notesEdit.doAfterTextChanged { updateProfileInfo() }
+        findViewById<Button>(R.id.profileBtn).setOnClickListener {
+            val game = Gemini.game(this)
+            if (game.isEmpty()) {
+                Toast.makeText(this, "Előbb add meg a játék nevét", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            val builtin = GameProfiles.builtin(game)
+            if (builtin != null) {
+                notesEdit.setText(builtin)
+                return@setOnClickListener
+            }
+            if (Gemini.apiKey(this).isEmpty()) {
+                Toast.makeText(this, "A profil készítéséhez Gemini-kulcs kell", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            profileInfo.text = "Profil készül a Geminivel…"
+            Thread {
+                val text = GameProfiles.generate(this, game)
+                runOnUiThread {
+                    if (text != null) {
+                        notesEdit.setText(text)
+                        profileInfo.text = "Kész. Nézd át, és javítsd, ha valami nem stimmel."
+                    } else {
+                        profileInfo.text = "Nem sikerült (${Gemini.lastError})."
+                    }
+                }
+            }.start()
+        }
 
         // Egyenleg és fogyasztás
         val topupEdit = findViewById<TextInputEditText>(R.id.topupEdit)

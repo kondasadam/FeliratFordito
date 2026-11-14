@@ -19,7 +19,7 @@ object Gemini {
     fun game(ctx: Context): String = prefs(ctx).getString("game", "").orEmpty().trim()
 
     /** Szöveg generálása. Hiba esetén null, az ok a [lastError]-ban. */
-    fun generate(ctx: Context, system: String, user: String, maxTokens: Int, timeoutMs: Int): String? {
+    fun generate(ctx: Context, system: String, user: String, maxTokens: Int, timeoutMs: Int, modelOverride: String? = null): String? {
         val key = apiKey(ctx)
         if (key.isEmpty()) {
             lastError = "nincs API-kulcs"
@@ -29,7 +29,7 @@ object Gemini {
             lastError = "keret elfogyott"
             return null
         }
-        val model = prefs(ctx).getString("geminiModel", DEFAULT_MODEL).orEmpty().trim().ifEmpty { DEFAULT_MODEL }
+        val model = modelOverride ?: prefs(ctx).getString("geminiModel", DEFAULT_MODEL).orEmpty().trim().ifEmpty { DEFAULT_MODEL }
 
         for (attempt in 0..1) {
             val gen = JSONObject().put("temperature", 0.2).put("maxOutputTokens", maxTokens)
