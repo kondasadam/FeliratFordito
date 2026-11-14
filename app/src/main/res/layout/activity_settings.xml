@@ -111,6 +111,31 @@
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
+            <!-- Leolvasás -->
+            <TextView style="@style/SectionTitle" android:text="Leolvasás" />
+
+            <com.google.android.material.card.MaterialCardView style="@style/SettingsCard">
+
+                <RadioGroup
+                    android:id="@+id/readGroup"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:padding="16dp">
+
+                    <com.google.android.material.radiobutton.MaterialRadioButton
+                        android:id="@+id/readPhoto"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Pontos – éles fényképekből olvas (ajánlott)" />
+
+                    <com.google.android.material.radiobutton.MaterialRadioButton
+                        android:id="@+id/readVideo"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Gyors – videóképből olvas, kevésbé pontos" />
+                </RadioGroup>
+            </com.google.android.material.card.MaterialCardView>
+
             <!-- Megjelenítés -->
             <TextView style="@style/SectionTitle" android:text="Megjelenítés" />
 

@@ -51,6 +51,13 @@ class SettingsActivity : AppCompatActivity() {
         bindText(R.id.gameEdit, "game", "")
         bindText(R.id.modelEdit, "geminiModel", Gemini.DEFAULT_MODEL)
 
+        // Leolvasás módja
+        val readGroup = findViewById<RadioGroup>(R.id.readGroup)
+        readGroup.check(if (prefs.getString("readMode", "photo") == "video") R.id.readVideo else R.id.readPhoto)
+        readGroup.setOnCheckedChangeListener { _, id ->
+            prefs.edit().putString("readMode", if (id == R.id.readVideo) "video" else "photo").apply()
+        }
+
         // Megjelenítés módja
         val modeGroup = findViewById<RadioGroup>(R.id.modeGroup)
         modeGroup.check(if (prefs.getString("displayMode", "ar") == "card") R.id.modeCard else R.id.modeAr)

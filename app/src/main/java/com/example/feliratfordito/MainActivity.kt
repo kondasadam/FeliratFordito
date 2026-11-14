@@ -5,6 +5,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.BitmapRegionDecoder
+import android.graphics.Matrix
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ColorMatrix
@@ -33,6 +36,8 @@ import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
@@ -90,7 +95,14 @@ class MainActivity : AppCompatActivity() {
     private var emptyReads = 0
 
     /** A kivágott sáv helye a nézetben (a felismert szöveg visszavetítéséhez). */
-    private class CropMap(val l: Float, val t: Float, val scale: Float, val offX: Float, val offY: Float, var enh: Float = 1f)
+    private class CropMap(val l: Float, val t: Float, val scale: Float, val offX: Float, val offY: Float) {
+        var enh: Float = 1f          // OCR előtti nagyítás
+        var img: Bitmap? = null      // a kivágott sáv színesben, álló helyzetben (háttérszín mintához)
+    }
+
+    private var imageCapture: ImageCapture? = null
+    private val capturing = AtomicBoolean(false)
+    private var readMode = "photo"   // photo = éles fényképekből (pontos), video = videóképből (gyors)
 
     private var camera: Camera? = null
     private lateinit var analysisExecutor: ExecutorService
@@ -222,6 +234,7 @@ class MainActivity : AppCompatActivity() {
             }
 
         analysisExecutor = Executors.newSingleThreadExecutor()
+        readMode = prefs.getString("readMode", "photo") ?: "photo"
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
@@ -280,6 +293,7 @@ class MainActivity : AppCompatActivity() {
         val rot = previewView.display?.rotation ?: Surface.ROTATION_0
         preview?.targetRotation = rot
         analysis?.targetRotation = rot
+        imageCapture?.targetRotation = rot
         cropNorm = loadBox()
         boxView.setBox(cropNorm)
         candidate = ""
@@ -302,6 +316,11 @@ class MainActivity : AppCompatActivity() {
             lastSource = ""
         }
         settingsVer = v
+        val m = prefs.getString("readMode", "photo") ?: "photo"
+        if (m != readMode) {
+            readMode = m
+            if (camera != null) startCamera()
+        }
     }
 
     private fun applyDisplayPrefs() {
@@ -334,29 +353,50 @@ class MainActivity : AppCompatActivity() {
                     .build()
                 preview.setSurfaceProvider(previewView.surfaceProvider)
 
-                // A lehető legnagyobb felbontás (4K, ha a telefon tudja) – a kis betűkhöz
-                val analysis = ImageAnalysis.Builder()
-                    .setTargetRotation(rot)
-                    .setResolutionSelector(
-                        ResolutionSelector.Builder()
-                            .setAspectRatioStrategy(aspect)
-                            .setResolutionStrategy(
-                                ResolutionStrategy(
-                                    Size(3840, 2160),
-                                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
-                                )
-                            )
-                            .build()
-                    )
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                    .build()
-                analysis.setAnalyzer(analysisExecutor) { proxy -> analyze(proxy) }
-
                 this.preview = preview
-                this.analysis = analysis
                 provider.unbindAll()
-                camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                mainHandler.removeCallbacks(captureTick)
+
+                if (readMode == "photo") {
+                    // Pontos mód: folyamatos, a lehető legnagyobb felbontású fényképek
+                    val ic = ImageCapture.Builder()
+                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                        .setFlashMode(ImageCapture.FLASH_MODE_OFF)
+                        .setTargetRotation(rot)
+                        .setResolutionSelector(
+                            ResolutionSelector.Builder()
+                                .setAspectRatioStrategy(aspect)
+                                .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
+                                .build()
+                        )
+                        .build()
+                    imageCapture = ic
+                    analysis = null
+                    camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, ic)
+                    mainHandler.postDelayed(captureTick, 600)
+                } else {
+                    // Gyors mód: videókép (4K, ha a telefon tudja)
+                    val an = ImageAnalysis.Builder()
+                        .setTargetRotation(rot)
+                        .setResolutionSelector(
+                            ResolutionSelector.Builder()
+                                .setAspectRatioStrategy(aspect)
+                                .setResolutionStrategy(
+                                    ResolutionStrategy(
+                                        Size(3840, 2160),
+                                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
+                                    )
+                                )
+                                .build()
+                        )
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                        .build()
+                    an.setAnalyzer(analysisExecutor) { proxy -> analyze(proxy) }
+                    analysis = an
+                    imageCapture = null
+                    camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, an)
+                }
                 camera?.cameraControl?.setLinearZoom(zoomBar.progress / 100f)
                 camera?.cameraInfo?.zoomState?.observe(this) { zs ->
                     zoomBar.progress = (zs.linearZoom * 100).toInt()
@@ -416,14 +456,75 @@ class MainActivity : AppCompatActivity() {
             proxy.close()
         }
         if (cropped == null) return
-        val (crop, map) = cropped
+        processCrop(cropped.first, rotation, cropped.second, 1.5f)
+    }
 
-        val (input, enh) = enhance(crop)
+    /** Közös feldolgozás: álló helyzetbe forgatás, kontrasztjavítás, szövegfelismerés. */
+    private fun processCrop(crop: Bitmap, rotation: Int, map: CropMap, contrast: Float) {
+        val upright = if (rotation == 0) crop else
+            Bitmap.createBitmap(crop, 0, 0, crop.width, crop.height, Matrix().apply { postRotate(rotation.toFloat()) }, true)
+        map.img = upright
+        val (input, enh) = enhance(upright, contrast)
         map.enh = enh
         busy.set(true)
-        recognizer.process(InputImage.fromBitmap(input, rotation))
+        recognizer.process(InputImage.fromBitmap(input, 0))
             .addOnSuccessListener { result -> handleText(result, map) }
             .addOnFailureListener { busy.set(false) }
+    }
+
+    // ---------- Pontos mód: folyamatos, nagy felbontású fényképek ----------
+
+    private val captureTick = object : Runnable {
+        override fun run() {
+            val ic = imageCapture ?: return
+            if (!busy.get() && !capturing.get() && translatorReady && viewW > 0) {
+                capturing.set(true)
+                try {
+                    ic.takePicture(analysisExecutor, object : ImageCapture.OnImageCapturedCallback() {
+                        override fun onCaptureSuccess(image: ImageProxy) {
+                            try {
+                                processStill(image)
+                            } finally {
+                                capturing.set(false)
+                            }
+                        }
+                        override fun onError(exception: ImageCaptureException) {
+                            capturing.set(false)
+                        }
+                    })
+                } catch (e: Exception) {
+                    capturing.set(false)
+                }
+            }
+            mainHandler.postDelayed(this, 120)
+        }
+    }
+
+    /** A fényképből (JPEG) csak a kijelölt sávot dekódolja – gyors, és teljes felbontású. */
+    private fun processStill(image: ImageProxy) {
+        val rotation = image.imageInfo.rotationDegrees
+        val result: Pair<Bitmap, CropMap>? = try {
+            val cr = cropRectInBuffer(image.width, image.height, rotation)
+            if (cr == null) null else {
+                val buf = image.planes[0].buffer
+                buf.rewind()
+                val bytes = ByteArray(buf.remaining())
+                buf.get(bytes)
+                @Suppress("DEPRECATION")
+                val decoder = BitmapRegionDecoder.newInstance(bytes, 0, bytes.size, false)
+                val opts = BitmapFactory.Options().apply {
+                    inSampleSize = if (cr.first.width() > 2600 || cr.first.height() > 2600) 2 else 1
+                }
+                val bmp = decoder?.decodeRegion(cr.first, opts)
+                decoder?.recycle()
+                if (bmp == null) null else Pair(bmp, cr.second)
+            }
+        } catch (e: Exception) {
+            null
+        } finally {
+            image.close()
+        }
+        if (result != null) processCrop(result.first, rotation, result.second, 1.2f)
     }
 
     /**
@@ -488,12 +589,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Szürkeárnyalat + kontrasztnövelés (+ nagyítás, ha kicsi): a mozgó háttér kevésbé zavar. */
-    private fun enhance(src: Bitmap): Pair<Bitmap, Float> {
+    private fun enhance(src: Bitmap, contrast: Float): Pair<Bitmap, Float> {
         val scale = if (src.width < 900 && src.height < 900) 2f else 1f
         val w = (src.width * scale).toInt()
         val h = (src.height * scale).toInt()
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val contrast = 1.5f
         val shift = (-0.5f * contrast + 0.5f) * 255f
         val matrix = ColorMatrix().apply { setSaturation(0f) }
         matrix.postConcat(
@@ -513,6 +613,8 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- Felismert szöveg (fő szálon) ----------
 
+    private class Found(val text: String, val rect: RectF, val lineH: Float, val lines: Int, val bg: Int)
+
     /** Felismert szövegdoboz -> hely a képernyőn. */
     private fun toViewRect(b: Rect, m: CropMap) = RectF(
         m.offX + (m.l + b.left / m.enh) * m.scale,
@@ -520,6 +622,29 @@ class MainActivity : AppCompatActivity() {
         m.offX + (m.l + b.right / m.enh) * m.scale,
         m.offY + (m.t + b.bottom / m.enh) * m.scale
     )
+
+    /** Az eredeti szöveg körüli háttérszín (a doboz széle mentén mintavételezve). */
+    private fun sampleBg(b: Rect, m: CropMap): Int {
+        val img = m.img ?: return Color.rgb(20, 20, 24)
+        val l = (b.left / m.enh).toInt() - 3
+        val t = (b.top / m.enh).toInt() - 3
+        val r = (b.right / m.enh).toInt() + 3
+        val bt = (b.bottom / m.enh).toInt() + 3
+        var rs = 0L; var gs = 0L; var bs = 0L; var n = 0
+        fun add(x: Int, y: Int) {
+            if (x < 0 || y < 0 || x >= img.width || y >= img.height) return
+            val c = img.getPixel(x, y)
+            rs += Color.red(c); gs += Color.green(c); bs += Color.blue(c); n++
+        }
+        val stepX = maxOf(1, (r - l) / 24)
+        val stepY = maxOf(1, (bt - t) / 8)
+        var x = l
+        while (x <= r) { add(x, t); add(x, bt); x += stepX }
+        var y = t
+        while (y <= bt) { add(l, y); add(r, y); y += stepY }
+        if (n == 0) return Color.rgb(20, 20, 24)
+        return Color.rgb((rs / n).toInt(), (gs / n).toInt(), (bs / n).toInt())
+    }
 
     private fun handleText(result: Text, map: CropMap) {
         val kept = result.textBlocks
@@ -530,12 +655,14 @@ class MainActivity : AppCompatActivity() {
                 if (t.count { it.isLetter() } < 3 || box == null) null
                 else {
                     val lineH = (block.lines.firstOrNull()?.boundingBox?.height() ?: box.height()) / map.enh * map.scale
-                    Triple(t, toViewRect(box, map), lineH)
+                    Found(t, toViewRect(box, map), lineH, block.lines.size, sampleBg(box, map))
                 }
             }
-        val blocks = kept.map { it.first }
-        val rects = kept.map { it.second }
-        val lineHeights = kept.map { it.third }
+        val blocks = kept.map { it.text }
+        val rects = kept.map { it.rect }
+        val lineHeights = kept.map { it.lineH }
+        val lineCounts = kept.map { it.lines }
+        val colors = kept.map { it.bg }
         val source = blocks.joinToString("\n")
 
         // A felirat eltűnt: pár üres kép után a képről is levesszük a fordítást
@@ -557,7 +684,7 @@ class MainActivity : AppCompatActivity() {
                 // ugyanaz a felirat: a fordítás kövesse, ha kicsit elmozdult a kép
                 if (overlay.count == rects.size) overlay.moveRects(rects)
                 else if (overlay.count == 0 && lastTranslations.isNotEmpty()) {
-                    overlay.setRects(rects, lineHeights)
+                    overlay.setRects(rects, lineHeights, lineCounts, colors)
                     overlay.setTexts(lastTranslations)
                 }
             }
@@ -582,7 +709,7 @@ class MainActivity : AppCompatActivity() {
         lastSource = best
         sourceText.text = best
         lastTranslations = emptyList()
-        overlay.setRects(rects, lineHeights)
+        overlay.setRects(rects, lineHeights, lineCounts, colors)
         if (recording && (recLines.isEmpty() || !similar(recLines.last(), best))) recLines.add(best)
         translateBlocks(finalBlocks)
     }
@@ -730,7 +857,7 @@ class MainActivity : AppCompatActivity() {
 
         // 2) Gemini csak akkor, ha érdemes: van hosszabb mondat, és a felirat fél másodpercig kint marad.
         //    Egy feliratváltás = egyetlen kérés (a sorokat együtt küldjük), így kímélj a keretet.
-        if (!useGemini() || lines.none { wordCount(it.body) > 3 }) return
+        if (!useGemini() || (lines.size == 1 && wordCount(lines[0].body) <= 3)) return
         mainHandler.postDelayed({
             if (key != lastSource) return@postDelayed   // közben jött új felirat: nem kérdezzük
             netExecutor.execute {
@@ -760,6 +887,8 @@ class MainActivity : AppCompatActivity() {
             append(" A szöveg kamerás szövegfelismeréssel készült, lehetnek benne betűhibák: értelemszerűen javítsd őket.")
             append(" A személyneveket, helyneveket és a játék saját kifejezéseit hagyd eredetiben,")
             append(" kivéve ha a játék magyar változatában bevett fordításuk van.")
+            append(" Ha menüpontokat vagy rövid feliratokat kapsz, a magyar játékokban szokásos rövid menüneveket használd")
+            append(" (pl. Gear = Felszerelés, Inventory = Készlet, Map = Térkép, Quests = Küldetések).")
             append(" Pontosan annyi sort adj vissza, ahány sort kaptál, ugyanabban a sorrendben, sorszám nélkül.")
             append(" Csak a fordítást írd, magyarázat, idézőjel és a beszélő neve nélkül.")
         }
