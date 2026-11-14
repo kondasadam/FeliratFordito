@@ -773,7 +773,7 @@ class MainActivity : AppCompatActivity() {
             candidate = source
             candidateCount = 1
         }
-        val needed = if (readMode == "photo") 2 else 3
+        val needed = if (readMode == "photo") 1 else 2
         if (candidateCount < needed) {
             busy.set(false)
             return
