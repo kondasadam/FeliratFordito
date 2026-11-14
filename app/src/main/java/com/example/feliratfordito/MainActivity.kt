@@ -3,6 +3,7 @@ package com.example.feliratfordito
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.RectF
 import android.os.Bundle
 import android.util.Size
@@ -38,6 +39,10 @@ import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import org.json.JSONArray
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -286,7 +291,7 @@ class MainActivity : AppCompatActivity() {
     private fun handleText(result: Text) {
         val blocks = result.textBlocks
             .sortedBy { it.boundingBox?.top ?: 0 }
-            .map { block -> block.lines.joinToString(" ") { it.text }.trim() }
+            .map { block -> cleanup(block.lines.joinToString(" ") { it.text }) }
             .filter { s -> s.count { it.isLetter() } >= 3 }
         val source = blocks.joinToString("\n")
 
@@ -309,35 +314,156 @@ class MainActivity : AppCompatActivity() {
         translateBlocks(blocks)
     }
 
+    // ---------- Szöveg tisztítása (szövegfelismerési hibák javítása) ----------
+
+    private data class Line(val speaker: String?, val body: String)
+
+    // "Ruth Singer: szöveg" -> beszélő + szöveg (a név nem megy a fordítóba)
+    private val speakerRegex =
+        Regex("^([A-Z][\\p{L}'.\\-]*(?:\\s[A-Z][\\p{L}'.\\-]*){0,3})\\s*:\\s*(.+)$")
+
+    // Gyakori szavak "I" után: a felismerő az "I"-t gyakran "l"-nek olvassa és hozzáragasztja
+    private val wordsAfterI = setOf(
+        "appreciate", "am", "have", "had", "will", "would", "think", "know", "need", "want",
+        "can", "can't", "cannot", "don't", "didn't", "do", "did", "was", "wasn't", "must",
+        "should", "could", "see", "understand", "believe", "hope", "mean", "just", "really",
+        "never", "also", "feel", "promise", "guess", "suppose", "wonder", "said", "told",
+        "heard", "found", "thought", "love", "hate", "agree", "doubt", "assure", "remember",
+        "forgot", "tried", "got", "saw", "knew", "wanted", "needed", "shall", "may", "might",
+        "i'm", "i've", "i'll", "i'd", "imagine", "recommend", "apologize", "suggest", "expect"
+    )
+
+    private fun fixGluedI(rest: String): String? {
+        val r = rest.lowercase()
+        if (r in wordsAfterI) return r
+        if (r.length >= 6) {
+            // kis eltérés is elfogadható (pl. "apreclate" -> "appreciate")
+            val best = wordsAfterI.filter { it.length >= 6 }.minByOrNull { levenshtein(it, r) }
+            if (best != null && levenshtein(best, r) <= 2) return best
+        }
+        return null
+    }
+
+    private fun cleanup(s: String): String {
+        // ékezetek le (angol szövegben nincs ékezet: "timé" -> "time")
+        var t = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{Mn}+"), "")
+            .replace('’', '\'').replace('‘', '\'')
+        // "Singer:lappreciate" -> "Singer: lappreciate"
+        t = t.replace(Regex("(?<=[A-Za-z]):(?=\\S)"), ": ")
+        // "lappreciate" / "Iappreciate" -> "I appreciate"
+        t = Regex("\\b[lI1]([a-z']{2,})\\b").replace(t) { m ->
+            if (m.value.lowercase() in setOf("like", "let", "look", "last", "long", "list", "left", "life", "lot", "love", "line", "less", "late", "led", "lay", "law", "low", "lost", "lead", "land", "luck", "lady", "lord", "into", "idea", "item", "isle")) {
+                m.value
+            } else {
+                fixGluedI(m.groupValues[1])?.let { "I $it" } ?: m.value
+            }
+        }
+        return t.replace(Regex("\\s+"), " ").trim()
+    }
+
+    private fun splitSpeaker(s: String): Line {
+        val m = speakerRegex.find(s) ?: return Line(null, s)
+        return Line(m.groupValues[1], m.groupValues[2])
+    }
+
+    // ---------- Fordítás: azonnal offline, utána pontosabb online ----------
+
+    private val netExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val onlineCache = object : LinkedHashMap<String, String>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 300
+    }
+
+    private fun showLines(lines: List<Line>, tr: List<String>, online: Boolean) {
+        translatedText.text = lines.indices.joinToString("\n") { i ->
+            lines[i].speaker?.let { "$it: ${tr[i]}" } ?: tr[i]
+        }
+        // fehér = pontos online fordítás, szürkés = gyors offline fordítás
+        translatedText.setTextColor(if (online) Color.WHITE else Color.rgb(190, 190, 190))
+    }
+
     private fun translateBlocks(blocks: List<String>) {
-        val results = arrayOfNulls<String>(blocks.size)
-        var remaining = blocks.size
+        val key = blocks.joinToString("\n")
+        val lines = blocks.map { splitSpeaker(it) }
+
+        // Ha online már megvan, azonnal azt mutatjuk
+        val onlineHit = lines.map { onlineCache[it.body] }
+        if (onlineHit.all { it != null }) {
+            showLines(lines, onlineHit.map { it!! }, online = true)
+            busy.set(false)
+            return
+        }
+
+        val results = arrayOfNulls<String>(lines.size)
+        var remaining = lines.size
 
         fun finishOne() {
             remaining--
             if (remaining == 0) {
-                translatedText.text = results.joinToString("\n") { it ?: "" }
+                showLines(lines, results.map { it ?: "" }, online = false)
                 busy.set(false)
+                requestOnline(lines, onlineHit, key)
             }
         }
 
-        blocks.forEachIndexed { i, s ->
-            val cached = cache[s]
+        lines.forEachIndexed { i, ln ->
+            val cached = cache[ln.body]
             if (cached != null) {
                 results[i] = cached
                 finishOne()
             } else {
-                translator.translate(s)
+                translator.translate(ln.body)
                     .addOnSuccessListener { tr ->
-                        cache[s] = tr
+                        cache[ln.body] = tr
                         results[i] = tr
                         finishOne()
                     }
                     .addOnFailureListener {
-                        results[i] = s
+                        results[i] = ln.body
                         finishOne()
                     }
             }
+        }
+    }
+
+    private fun requestOnline(lines: List<Line>, cached: List<String?>, key: String) {
+        netExecutor.execute {
+            val out = lines.indices.map { i -> cached[i] ?: googleTranslate(lines[i].body) }
+            if (out.any { it == null }) return@execute   // nincs internet: marad az offline
+            runOnUiThread {
+                lines.forEachIndexed { i, ln -> onlineCache[ln.body] = out[i]!! }
+                // csak akkor cseréljük, ha közben nem jött új felirat
+                if (key == lastSource) showLines(lines, out.map { it!! }, online = true)
+            }
+        }
+    }
+
+    /** Google Fordító (online, kulcs nélkül). Hiba vagy internet hiánya esetén null. */
+    private fun googleTranslate(text: String): String? {
+        return try {
+            val url = URL(
+                "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=hu&dt=t&q=" +
+                    URLEncoder.encode(text, "UTF-8")
+            )
+            val c = url.openConnection() as HttpURLConnection
+            c.connectTimeout = 2500
+            c.readTimeout = 2500
+            c.setRequestProperty("User-Agent", "Mozilla/5.0")
+            try {
+                if (c.responseCode != 200) return null
+                val body = c.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                val segs = JSONArray(body).getJSONArray(0)
+                val sb = StringBuilder()
+                for (i in 0 until segs.length()) {
+                    val seg = segs.optJSONArray(i) ?: continue
+                    sb.append(seg.optString(0, ""))
+                }
+                sb.toString().trim().ifEmpty { null }
+            } finally {
+                c.disconnect()
+            }
+        } catch (e: Exception) {
+            null
         }
     }
 
@@ -367,6 +493,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         analysisExecutor.shutdown()
+        netExecutor.shutdown()
         recognizer.close()
         translator.close()
     }

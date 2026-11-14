@@ -14,6 +14,8 @@ android {
         // Minden GitHub-os építés nagyobb verziószámot kap, így a frissítés rátelepíthető
         versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
         versionName = "1.${System.getenv("GITHUB_RUN_NUMBER") ?: "0"}"
+        // csak telefonos processzorokra: kisebb APK
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
 
     signingConfigs {
