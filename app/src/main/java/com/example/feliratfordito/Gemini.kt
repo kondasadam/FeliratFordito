@@ -56,6 +56,12 @@ object Gemini {
                 if (code == 200) {
                     val json = JSONObject(c.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() })
                     c.disconnect()
+                    // fogyasztás nyilvántartása (tokenszám a válaszból)
+                    json.optJSONObject("usageMetadata")?.let { u ->
+                        val inTok = u.optLong("promptTokenCount", 0)
+                        val outTok = u.optLong("candidatesTokenCount", 0) + u.optLong("thoughtsTokenCount", 0)
+                        UsageStore.record(ctx, inTok, outTok)
+                    }
                     val parts = json.optJSONArray("candidates")?.optJSONObject(0)
                         ?.optJSONObject("content")?.optJSONArray("parts")
                     if (parts == null) {
@@ -75,6 +81,7 @@ object Gemini {
                 c.disconnect()
                 if (code == 400 && attempt == 0) continue   // pl. a modell nem ismeri a thinkingConfig-ot
                 lastError = when (code) {
+                    402 -> "elfogyott a kredit"
                     400, 401, 403 -> "rossz kulcs? ($code)"
                     404 -> "ismeretlen modell"
                     429 -> "keret elfogyott"

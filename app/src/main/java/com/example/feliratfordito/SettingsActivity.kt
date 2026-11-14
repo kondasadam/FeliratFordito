@@ -1,6 +1,9 @@
 package com.example.feliratfordito
 
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.widget.Toast
 import android.util.TypedValue
 import android.widget.Button
 import android.widget.RadioGroup
@@ -50,6 +53,39 @@ class SettingsActivity : AppCompatActivity() {
         bindText(R.id.keyEdit, "geminiKey", "")
         bindText(R.id.gameEdit, "game", "")
         bindText(R.id.modelEdit, "geminiModel", Gemini.DEFAULT_MODEL)
+
+        // Egyenleg és fogyasztás
+        val topupEdit = findViewById<TextInputEditText>(R.id.topupEdit)
+        findViewById<Button>(R.id.topupBtn).setOnClickListener {
+            val v = topupEdit.text?.toString()?.replace(',', '.')?.toDoubleOrNull()
+            if (v == null || v < 0) {
+                Toast.makeText(this, "Adj meg egy összeget dollárban, pl. 5", Toast.LENGTH_SHORT).show()
+            } else {
+                UsageStore.setBalance(this, v)
+                topupEdit.setText("")
+                refreshUsage()
+                Toast.makeText(this, "Egyenleg beállítva: ${UsageStore.usd(v)}", Toast.LENGTH_SHORT).show()
+            }
+        }
+        findViewById<Button>(R.id.studioBtn).setOnClickListener {
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/billing")))
+            } catch (e: Exception) { }
+        }
+        fun bindPrice(viewId: Int, key: String, default: Double) {
+            val edit = findViewById<TextInputEditText>(viewId)
+            edit.setText(prefs.getFloat(key, default.toFloat()).toString())
+            edit.doAfterTextChanged {
+                val v = it?.toString()?.replace(',', '.')?.toFloatOrNull()
+                if (v != null && v >= 0) {
+                    prefs.edit().putFloat(key, v).apply()
+                    refreshUsage()
+                }
+            }
+        }
+        bindPrice(R.id.priceInEdit, "priceIn", UsageStore.DEFAULT_PRICE_IN)
+        bindPrice(R.id.priceOutEdit, "priceOut", UsageStore.DEFAULT_PRICE_OUT)
+        refreshUsage()
 
         // Leolvasás módja
         val readGroup = findViewById<RadioGroup>(R.id.readGroup)
@@ -118,5 +154,21 @@ class SettingsActivity : AppCompatActivity() {
                 }
             }.start()
         }
+    }
+
+    private fun refreshUsage() {
+        val st = UsageStore.stats(this)
+        findViewById<TextView>(R.id.balanceText).text =
+            st.balance?.let { UsageStore.usdHuf(it) } ?: "Add meg a feltöltött összeget"
+        findViewById<TextView>(R.id.usageText).text = buildString {
+            append("Ma: ${st.todayReq} kérés · ${UsageStore.usdHuf(st.todayCost)}\n")
+            append("Ebben a hónapban: ${st.monthReq} kérés · ${UsageStore.usdHuf(st.monthCost)}\n")
+            append("Feltöltés óta elhasznált: ${UsageStore.usdHuf(st.spent)}")
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refreshUsage()
     }
 }

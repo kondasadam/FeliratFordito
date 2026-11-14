@@ -70,7 +70,12 @@ class HomeActivity : AppCompatActivity() {
     private fun refreshStatus() {
         val gemini = prefs.getString("engine", "gemini") == "gemini" && Gemini.apiKey(this).isNotEmpty()
         findViewById<Chip>(R.id.engineChip).apply {
-            text = if (gemini) "● Gemini bekapcsolva" else "● Google Fordító"
+            val bal = UsageStore.stats(this@HomeActivity).balance
+            text = when {
+                !gemini -> "● Google Fordító"
+                bal != null -> "● Gemini · ${UsageStore.usd(bal)}"
+                else -> "● Gemini bekapcsolva"
+            }
             setTextColor(if (gemini) Color.rgb(129, 199, 132) else Color.rgb(255, 213, 79))
         }
         val game = Gemini.game(this)
