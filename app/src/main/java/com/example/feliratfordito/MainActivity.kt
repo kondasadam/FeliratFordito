@@ -221,6 +221,7 @@ class MainActivity : AppCompatActivity() {
         }
         boxView.onPinchEnd = { zoomChanged() }
 
+        SpellFix.load(this)
         recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
         translator = Translation.getClient(
             TranslatorOptions.Builder()
@@ -490,7 +491,38 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Közös feldolgozás: álló helyzetbe forgatás, kontrasztjavítás, szövegfelismerés. */
+    private var sharpAvg = 0.0
+    @Volatile private var lastOcrAt = 0L
+
+    /** Élesség becslése (Laplace-szűrő átlagos erőssége egy kicsinyített szürke képen). */
+    private fun sharpness(b: Bitmap): Double {
+        val w = 160
+        val h = maxOf(8, b.height * w / maxOf(1, b.width))
+        val small = Bitmap.createScaledBitmap(b, w, h, true)
+        val px = IntArray(w * h)
+        small.getPixels(px, 0, w, 0, 0, w, h)
+        val g = IntArray(w * h) { i ->
+            val c = px[i]
+            (((c shr 16) and 0xff) * 299 + ((c shr 8) and 0xff) * 587 + (c and 0xff) * 114) / 1000
+        }
+        var sum = 0L
+        for (y in 1 until h - 1) for (x in 1 until w - 1) {
+            val i = y * w + x
+            sum += kotlin.math.abs(4 * g[i] - g[i - 1] - g[i + 1] - g[i - w] - g[i + w])
+        }
+        return sum.toDouble() / ((w - 2) * (h - 2))
+    }
+
     private fun processCrop(crop: Bitmap, rotation: Int, map: CropMap, contrast: Float) {
+        // Elmosódott képkocka (bemozdulás, fókuszálás): kihagyjuk, ha nemrég volt jobb
+        val sharp = try { sharpness(crop) } catch (e: Exception) { 0.0 }
+        val nowMs = System.currentTimeMillis()
+        if (readMode == "video" && sharpAvg > 0 && sharp < sharpAvg * 0.6 && nowMs - lastOcrAt < 700) {
+            sharpAvg = sharpAvg * 0.95 + sharp * 0.05
+            return
+        }
+        sharpAvg = if (sharpAvg == 0.0) sharp else sharpAvg * 0.9 + sharp * 0.1
+        lastOcrAt = nowMs
         val upright = if (rotation == 0) crop else
             Bitmap.createBitmap(crop, 0, 0, crop.width, crop.height, Matrix().apply { postRotate(rotation.toFloat()) }, true)
         map.img = upright
@@ -715,7 +747,7 @@ class MainActivity : AppCompatActivity() {
 
         if (source.isNotEmpty()) {
             recentReads.addLast(source)
-            while (recentReads.size > 4) recentReads.removeFirst()
+            while (recentReads.size > 6) recentReads.removeFirst()
         }
 
         // Üres kép: marad az utolsó fordítás. Ugyanaz a felirat: nincs újrafordítás (nem villog).
@@ -751,9 +783,8 @@ class MainActivity : AppCompatActivity() {
         lastCommitAt = now
 
         // Az utolsó leolvasások közül a leggyakoribb változat (egy elmosódott kép nem ront el szót)
-        val best = recentReads.filter { sameSubtitle(it, source) }
-            .groupingBy { it }.eachCount()
-            .maxByOrNull { it.value }?.takeIf { it.value >= 2 }?.key ?: source
+        // Szavankénti szavazás az utolsó leolvasások között: egy-egy rosszul olvasott betű kiesik
+        val best = voteText(recentReads.filter { sameSubtitle(it, source) }).ifEmpty { source }
         val finalBlocks = if (best == source) blocks else best.split("\n")
 
         lastSource = best
@@ -807,7 +838,9 @@ class MainActivity : AppCompatActivity() {
             if (m.value.lowercase() in realLWords) m.value
             else fixGluedI(m.groupValues[1])?.let { "I $it" } ?: m.value
         }
-        return t.replace(Regex("\\s+"), " ").trim()
+        t = t.replace(Regex("\\s+"), " ").trim()
+        // angol helyesírás-javítás a felismerési hibákra (beépített szólista)
+        return SpellFix.fixText(t)
     }
 
     private fun splitSpeaker(s: String): Line {
@@ -1100,6 +1133,23 @@ class MainActivity : AppCompatActivity() {
     // ---------- Segédfüggvények ----------
 
     /** Két szöveg "ugyanaz-e" (a szövegfelismerés apró eltéréseit elnézve). */
+    /** Több leolvasásból soronként és szavanként a leggyakoribb változatot rakja össze. */
+    private fun voteText(reads: List<String>): String {
+        if (reads.isEmpty()) return ""
+        if (reads.size < 3) return reads.last()
+        val split = reads.map { it.split("\n") }
+        val lineCount = split.groupingBy { it.size }.eachCount().maxByOrNull { it.value }!!.key
+        val rs = split.filter { it.size == lineCount }
+        return (0 until lineCount).joinToString("\n") { li ->
+            val lines = rs.map { it[li].split(" ") }
+            val wc = lines.groupingBy { it.size }.eachCount().maxByOrNull { it.value }!!.key
+            val same = lines.filter { it.size == wc }
+            (0 until wc).joinToString(" ") { wi ->
+                same.map { it[wi] }.groupingBy { it }.eachCount().maxByOrNull { it.value }!!.key
+            }
+        }
+    }
+
     /** 0..1 hasonlóság (betűszinten). */
     private fun textSimilarity(a: String, b: String): Double {
         if (a.isEmpty() || b.isEmpty()) return 0.0
