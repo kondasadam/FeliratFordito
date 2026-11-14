@@ -49,8 +49,19 @@ class TranslationOverlayView @JvmOverloads constructor(
     /** Ugyanaz a szöveg, csak kicsit elmozdult a kép: a helyeket frissítjük, a fordítás marad. */
     fun moveRects(rects: List<RectF>) {
         if (rects.size != items.size) return
-        items.forEachIndexed { i, it -> it.rect.set(rects[i]) }
-        invalidate()
+        val dead = 14f * density   // apró ingadozásra nem mozdulunk
+        var changed = false
+        items.forEachIndexed { i, it ->
+            val n = rects[i]
+            val dx = n.centerX() - it.rect.centerX()
+            val dy = n.centerY() - it.rect.centerY()
+            if (kotlin.math.abs(dx) > dead || kotlin.math.abs(dy) > dead) {
+                // simított követés: csak részben lépünk az új hely felé
+                it.rect.offset(dx * 0.4f, dy * 0.4f)
+                changed = true
+            }
+        }
+        if (changed) invalidate()
     }
 
     /** Fordítások beírása. Ha a sorok száma eltér, egy közös dobozba kerül minden. */

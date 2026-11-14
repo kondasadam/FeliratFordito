@@ -94,6 +94,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var overlay: TranslationOverlayView
     private var arMode = true          // fordítás a felirat helyén (a képen)
     private var emptyReads = 0
+    private var lastTextSeenAt = 0L      // mikor láttunk utoljára szöveget a keretben
+    private var lastCommitAt = 0L        // mikor jelent meg az utolsó új felirat
+    private var candidateCount = 0       // hány egymás utáni képen volt ugyanaz az új szöveg
     private var pendingImg: Bitmap? = null   // a legutóbbi felirat képe (a Gemini ebből olvas Profi módban)
 
     /** A kivágott sáv helye a nézetben (a felismert szöveg visszavetítéséhez). */
@@ -700,12 +703,14 @@ class MainActivity : AppCompatActivity() {
         val colors = kept.map { it.bg }
         val source = blocks.joinToString("\n")
 
-        // A felirat eltűnt: pár üres kép után a képről is levesszük a fordítást
+        // A felirat eltűnt: csak ha kb. 1,2 mp-ig nincs szöveg, vesszük le (egy-egy kihagyott kép miatt nem villan)
+        val now = System.currentTimeMillis()
         if (source.isEmpty()) {
             emptyReads++
-            if (emptyReads >= 3) overlay.clear()
+            if (now - lastTextSeenAt > 1200) overlay.clear()
         } else {
             emptyReads = 0
+            lastTextSeenAt = now
         }
 
         if (source.isNotEmpty()) {
@@ -714,7 +719,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Üres kép: marad az utolsó fordítás. Ugyanaz a felirat: nincs újrafordítás (nem villog).
-        if (source.isEmpty() || similar(source, lastSource)) {
+        // Ugyanaz a felirat (kis leolvasási eltérésekkel), vagy friss felirat, ami még nem tér el lényegesen
+        val sameAsShown = lastSource.isNotEmpty() &&
+            (sameSubtitle(source, lastSource) || (now - lastCommitAt < 1000 && textSimilarity(source, lastSource) > 0.5))
+        if (source.isEmpty() || sameAsShown) {
             if (source.isNotEmpty()) {
                 // ugyanaz a felirat: a fordítás kövesse, ha kicsit elmozdult a kép
                 if (overlay.count == rects.size) overlay.moveRects(rects)
@@ -724,19 +732,26 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             candidate = ""
+            candidateCount = 0
             busy.set(false)
             return
         }
-        // Új szöveg: csak akkor fordítjuk, ha két egymás utáni képen is ugyanaz
-        if (!similar(source, candidate)) {
+        // Új szöveg: csak akkor fordítjuk, ha több egymás utáni képen is ugyanaz (videónál 3, fényképnél 2)
+        if (candidate.isNotEmpty() && sameSubtitle(source, candidate)) candidateCount++ else {
             candidate = source
+            candidateCount = 1
+        }
+        val needed = if (readMode == "photo") 2 else 3
+        if (candidateCount < needed) {
             busy.set(false)
             return
         }
         candidate = ""
+        candidateCount = 0
+        lastCommitAt = now
 
         // Az utolsó leolvasások közül a leggyakoribb változat (egy elmosódott kép nem ront el szót)
-        val best = recentReads.filter { similar(it, source) }
+        val best = recentReads.filter { sameSubtitle(it, source) }
             .groupingBy { it }.eachCount()
             .maxByOrNull { it.value }?.takeIf { it.value >= 2 }?.key ?: source
         val finalBlocks = if (best == source) blocks else best.split("\n")
@@ -888,8 +903,10 @@ class MainActivity : AppCompatActivity() {
         prefs.getString("engine", "gemini") == "gemini" && Gemini.apiKey(this).isNotEmpty()
 
     private fun requestOnline(lines: List<Line>, googleHit: List<String?>, key: String, history: List<String>) {
-        // 1) Google azonnal (gyors, nincs kerete)
-        if (googleHit.any { it == null }) {
+        val quality = prefs.getString("quality", "pro") ?: "pro"
+        val geminiWillRun = useGemini() && !(lines.size == 1 && wordCount(lines[0].body) <= 3)
+        // 1) Google azonnal – de Profi/Csúcs módban kihagyjuk (kevesebb szövegcsere); ott csak tartalék
+        if (googleHit.any { it == null } && !(geminiWillRun && quality != "eco")) {
             netExecutor.execute {
                 val out = lines.indices.map { i -> googleHit[i] ?: googleTranslate(lines[i].body) }
                 if (out.any { it == null }) return@execute   // nincs internet: marad az offline
@@ -918,6 +935,15 @@ class MainActivity : AppCompatActivity() {
                         }
                     } else if (key == lastSource) {
                         sourceText.text = "$lastSource   [Google · Gemini: ${Gemini.lastError}]"
+                        // tartalék: Google-fordítás, ha a Gemini nem válaszolt
+                        netExecutor.execute {
+                            val out = lines.map { googleCache[it.body] ?: googleTranslate(it.body) }
+                            if (out.any { it == null }) return@execute
+                            runOnUiThread {
+                                lines.forEachIndexed { i, ln -> googleCache[ln.body] = out[i]!! }
+                                if (key == lastSource && geminiShownFor != key) showLines(lines, out.map { it!! }, "Google")
+                            }
+                        }
                     }
                 }
             }
@@ -1074,6 +1100,25 @@ class MainActivity : AppCompatActivity() {
     // ---------- Segédfüggvények ----------
 
     /** Két szöveg "ugyanaz-e" (a szövegfelismerés apró eltéréseit elnézve). */
+    /** 0..1 hasonlóság (betűszinten). */
+    private fun textSimilarity(a: String, b: String): Double {
+        if (a.isEmpty() || b.isEmpty()) return 0.0
+        if (a == b) return 1.0
+        val maxLen = maxOf(a.length, b.length)
+        return 1.0 - levenshtein(a, b).toDouble() / maxLen
+    }
+
+    /** Ugyanaz a felirat-e: betűszinten nagyon hasonló, vagy a szavak nagy része közös (a felismerés ingadozását elnézve). */
+    private fun sameSubtitle(a: String, b: String): Boolean {
+        if (a.isEmpty() || b.isEmpty()) return false
+        if (textSimilarity(a, b) >= 0.75) return true
+        val wa = a.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length > 1 }.toSet()
+        val wb = b.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length > 1 }.toSet()
+        if (wa.isEmpty() || wb.isEmpty()) return false
+        val common = wa.intersect(wb).size.toDouble()
+        return common / minOf(wa.size, wb.size) >= 0.7 && common / maxOf(wa.size, wb.size) >= 0.5
+    }
+
     private fun similar(a: String, b: String): Boolean {
         if (a.isEmpty() || b.isEmpty()) return false
         if (a == b) return true
