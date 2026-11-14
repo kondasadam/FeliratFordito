@@ -3,17 +3,21 @@ package com.example.feliratfordito
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
+import android.graphics.Paint
+import android.graphics.Rect
+import android.graphics.RectF
 import android.net.Uri
 import android.os.Build
-import android.provider.Settings
-import androidx.core.content.FileProvider
-import androidx.core.content.pm.PackageInfoCompat
-import org.json.JSONObject
-import java.io.File
-import android.graphics.Bitmap
-import android.graphics.Color
-import android.graphics.RectF
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
 import android.util.Size
 import android.util.TypedValue
 import android.view.View
@@ -24,14 +28,16 @@ import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
-import androidx.appcompat.app.AlertDialog
 import android.widget.SeekBar
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
@@ -41,6 +47,8 @@ import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import androidx.core.content.pm.PackageInfoCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.google.mlkit.common.model.DownloadConditions
@@ -54,22 +62,22 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Élő feliratfordító: a kamera képén a kijelölt sávban felismeri az angol szöveget
- * (ML Kit, a telefonon), és offline lefordítja magyarra (ML Kit Translate).
+ * (ML Kit, a telefonon), azonnal lefordítja offline, majd pontosabban online
+ * (Google Fordító, illetve Gemini a játék és az előzmények ismeretében).
  */
 class MainActivity : AppCompatActivity() {
-
-    companion object {
-        const val DEFAULT_MODEL = "gemini-flash-lite-latest"
-    }
 
     private lateinit var previewView: PreviewView
     private lateinit var boxView: SubtitleBoxView
@@ -78,11 +86,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
     private lateinit var zoomBar: SeekBar
     private lateinit var updateBtn: Button
+    private lateinit var recBtn: Button
+    private var recDefaultTint: ColorStateList? = null
 
     private var camera: Camera? = null
     private lateinit var analysisExecutor: ExecutorService
+    private val netExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private lateinit var recognizer: TextRecognizer
     private lateinit var translator: Translator
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     @Volatile private var translatorReady = false
     private val busy = AtomicBoolean(false)
@@ -94,13 +106,27 @@ class MainActivity : AppCompatActivity() {
 
     private var lastSource = ""      // amit utoljára lefordítottunk
     private var candidate = ""       // új szöveg, amit még egyszer látni kell, mielőtt fordítjuk
+    private val recentReads = ArrayDeque<String>()   // utolsó leolvasások (a legmegbízhatóbb kiválasztásához)
     private var textSizeSp = 26f
 
-    private val cache = object : LinkedHashMap<String, String>(64, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 300
-    }
+    private val offlineCache = lruMap()
+    private val googleCache = lruMap()
+    private val geminiCache = lruMap()          // kulcs: a teljes felirat
+    private var geminiShownFor = ""             // ehhez a felirathoz már Gemini-fordítás látszik
+
+    private val recentHistory = ArrayDeque<String>()   // utolsó feliratok a Gemini-nek (háttér)
+
+    // Felvétel
+    private var recording = false
+    private var recStart = 0L
+    private val recLines = ArrayList<String>()
+    private val recTranslations = HashMap<String, String>()
 
     private val prefs by lazy { getSharedPreferences("beallitasok", MODE_PRIVATE) }
+
+    private fun lruMap() = object : LinkedHashMap<String, String>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 300
+    }
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -125,7 +151,14 @@ class MainActivity : AppCompatActivity() {
         statusText = findViewById(R.id.statusText)
         zoomBar = findViewById(R.id.zoomBar)
         updateBtn = findViewById(R.id.updateBtn)
+        recBtn = findViewById(R.id.recBtn)
+        recDefaultTint = recBtn.backgroundTintList
+
         updateBtn.setOnClickListener { startUpdate() }
+        recBtn.setOnClickListener { toggleRecording() }
+        findViewById<Button>(R.id.summaryBtn).setOnClickListener {
+            startActivity(Intent(this, SummaryActivity::class.java))
+        }
         findViewById<Button>(R.id.settingsBtn).setOnClickListener { openSettings() }
         statusText.setOnClickListener { if (translatorReady) statusText.visibility = View.GONE }
 
@@ -144,6 +177,9 @@ class MainActivity : AppCompatActivity() {
             cropNorm = RectF(r)
             prefs.edit().putFloat("l", r.left).putFloat("t", r.top)
                 .putFloat("r", r.right).putFloat("b", r.bottom).apply()
+            // élesség és fénymérés a keret új helyére (kis késleltetéssel)
+            mainHandler.removeCallbacks(focusNow)
+            mainHandler.postDelayed(focusNow, 400)
         }
 
         previewView.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
@@ -158,6 +194,8 @@ class MainActivity : AppCompatActivity() {
             override fun onStartTrackingTouch(sb: SeekBar?) {}
             override fun onStopTrackingTouch(sb: SeekBar?) {
                 prefs.edit().putInt("zoom", zoomBar.progress).apply()
+                mainHandler.removeCallbacks(focusNow)
+                mainHandler.postDelayed(focusNow, 300)
             }
         })
 
@@ -208,6 +246,8 @@ class MainActivity : AppCompatActivity() {
         prefs.edit().putFloat("meret", textSizeSp).apply()
     }
 
+    // ---------- Kamera ----------
+
     private fun startCamera() {
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
@@ -220,14 +260,15 @@ class MainActivity : AppCompatActivity() {
                     .build()
                 preview.setSurfaceProvider(previewView.surfaceProvider)
 
+                // A lehető legnagyobb felbontás (4K, ha a telefon tudja) – a kis betűkhöz
                 val analysis = ImageAnalysis.Builder()
                     .setResolutionSelector(
                         ResolutionSelector.Builder()
                             .setAspectRatioStrategy(aspect)
                             .setResolutionStrategy(
                                 ResolutionStrategy(
-                                    Size(1920, 1080),
-                                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                                    Size(3840, 2160),
+                                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
                                 )
                             )
                             .build()
@@ -240,13 +281,47 @@ class MainActivity : AppCompatActivity() {
                 provider.unbindAll()
                 camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
                 camera?.cameraControl?.setLinearZoom(zoomBar.progress / 100f)
+
+                mainHandler.removeCallbacks(periodicFocus)
+                mainHandler.postDelayed(periodicFocus, 800)
             } catch (e: Exception) {
                 showStatus("A kamera nem indult el: ${e.message}")
             }
         }, ContextCompat.getMainExecutor(this))
     }
 
-    /** Kamerakép feldolgozása (háttérszálon). */
+    private val focusNow = Runnable { focusOnBox() }
+
+    // 10 másodpercenként újra élesít a keretre (ha elmozdulna a telefon)
+    private val periodicFocus = object : Runnable {
+        override fun run() {
+            focusOnBox()
+            mainHandler.postDelayed(this, 10_000)
+        }
+    }
+
+    /** Élesség és fénymérés a sárga keretre: így a fényes tévén sem folynak szét a betűk. */
+    private fun focusOnBox() {
+        val cam = camera ?: return
+        if (previewView.width == 0 || previewView.height == 0) return
+        val r = cropNorm
+        val point = previewView.meteringPointFactory.createPoint(
+            r.centerX() * previewView.width,
+            r.centerY() * previewView.height,
+            r.width().coerceIn(0.1f, 0.6f)
+        )
+        val action = FocusMeteringAction.Builder(
+            point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+        ).disableAutoCancel().build()
+        try {
+            cam.cameraControl.startFocusAndMetering(action)
+        } catch (e: Exception) {
+            // nem minden telefon támogatja – ilyenkor marad az automatikus
+        }
+    }
+
+    // ---------- Képfeldolgozás (háttérszálon) ----------
+
     private fun analyze(proxy: ImageProxy) {
         if (busy.get() || !translatorReady || viewW == 0 || viewH == 0) {
             proxy.close()
@@ -254,7 +329,7 @@ class MainActivity : AppCompatActivity() {
         }
         val rotation = proxy.imageInfo.rotationDegrees
         val crop: Bitmap? = try {
-            cropForBox(proxy.toBitmap(), rotation)
+            extractCrop(proxy, rotation)
         } catch (e: Exception) {
             null
         } finally {
@@ -262,10 +337,7 @@ class MainActivity : AppCompatActivity() {
         }
         if (crop == null) return
 
-        // Kis felbontású kivágásnál nagyítunk, így a szövegfelismerő pontosabb
-        val input = if (crop.width < 900 && crop.height < 900)
-            Bitmap.createScaledBitmap(crop, crop.width * 2, crop.height * 2, true) else crop
-
+        val input = enhance(crop)
         busy.set(true)
         recognizer.process(InputImage.fromBitmap(input, rotation))
             .addOnSuccessListener { result -> handleText(result) }
@@ -273,14 +345,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * A képernyőn kijelölt sávot átszámolja a kamerakép (puffer) koordinátáira és kivágja.
+     * A képernyőn kijelölt sávot átszámolja a kamerakép (puffer) koordinátáira.
      * A PreviewView "fillCenter" módban van: a kép kitölti a nézetet, a széleket levágja.
      */
-    private fun cropForBox(full: Bitmap, rotation: Int): Bitmap? {
-        val bw = full.width
-        val bh = full.height
+    private fun cropRectInBuffer(bw: Int, bh: Int, rotation: Int): Rect? {
         val sideways = rotation == 90 || rotation == 270
-        val iw = if (sideways) bh else bw   // a kép szélessége álló (kijelzett) helyzetben
+        val iw = if (sideways) bh else bw   // a kép szélessége kijelzett helyzetben
         val ih = if (sideways) bw else bh
 
         val vw = viewW.toFloat()
@@ -296,7 +366,7 @@ class MainActivity : AppCompatActivity() {
         val b = ((box.bottom * vh - offY) / scale).coerceIn(0f, ih.toFloat())
         if (r - l < 8f || b - t < 8f) return null
 
-        // Kijelzett koordináták -> puffer koordináták (rotation = ennyivel kell az órajárás szerint forgatni)
+        // kijelzett -> puffer koordináták (rotation = ennyivel kell órajárás szerint forgatni)
         val x0: Float; val y0: Float; val x1: Float; val y1: Float
         when (rotation) {
             90 -> { x0 = t; y0 = bh - r; x1 = b; y1 = bh - l }
@@ -308,16 +378,70 @@ class MainActivity : AppCompatActivity() {
         val y = y0.toInt().coerceIn(0, bh - 1)
         val w = (x1.toInt() - x).coerceIn(1, bw - x)
         val h = (y1.toInt() - y).coerceIn(1, bh - y)
-        return Bitmap.createBitmap(full, x, y, w, h)
+        return Rect(x, y, x + w, y + h)
     }
 
-    /** Felismert szöveg kezelése (fő szálon). */
+    /** Csak a kijelölt sávot másolja ki a kameraképből (gyors, nagy felbontásnál is). */
+    private fun extractCrop(proxy: ImageProxy, rotation: Int): Bitmap? {
+        val rect = cropRectInBuffer(proxy.width, proxy.height, rotation) ?: return null
+        val plane = proxy.planes[0]
+        val buf = plane.buffer
+        buf.rewind()
+        val rowStride = plane.rowStride
+        val pxStride = plane.pixelStride   // RGBA: 4
+        val w = rect.width()
+        val h = rect.height()
+        val rowBytes = w * 4
+        val out = ByteBuffer.allocate(rowBytes * h)
+        val row = ByteArray(rowBytes)
+        for (yy in 0 until h) {
+            buf.position((rect.top + yy) * rowStride + rect.left * pxStride)
+            buf.get(row, 0, rowBytes)
+            out.put(row)
+        }
+        out.rewind()
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        bmp.copyPixelsFromBuffer(out)
+        return bmp
+    }
+
+    /** Szürkeárnyalat + kontrasztnövelés (+ nagyítás, ha kicsi): a mozgó háttér kevésbé zavar. */
+    private fun enhance(src: Bitmap): Bitmap {
+        val scale = if (src.width < 900 && src.height < 900) 2f else 1f
+        val w = (src.width * scale).toInt()
+        val h = (src.height * scale).toInt()
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val contrast = 1.5f
+        val shift = (-0.5f * contrast + 0.5f) * 255f
+        val matrix = ColorMatrix().apply { setSaturation(0f) }
+        matrix.postConcat(
+            ColorMatrix(
+                floatArrayOf(
+                    contrast, 0f, 0f, 0f, shift,
+                    0f, contrast, 0f, 0f, shift,
+                    0f, 0f, contrast, 0f, shift,
+                    0f, 0f, 0f, 1f, 0f
+                )
+            )
+        )
+        val paint = Paint(Paint.FILTER_BITMAP_FLAG).apply { colorFilter = ColorMatrixColorFilter(matrix) }
+        Canvas(out).drawBitmap(src, null, RectF(0f, 0f, w.toFloat(), h.toFloat()), paint)
+        return out
+    }
+
+    // ---------- Felismert szöveg (fő szálon) ----------
+
     private fun handleText(result: Text) {
         val blocks = result.textBlocks
             .sortedBy { it.boundingBox?.top ?: 0 }
             .map { block -> cleanup(block.lines.joinToString(" ") { it.text }) }
             .filter { s -> s.count { it.isLetter() } >= 3 }
         val source = blocks.joinToString("\n")
+
+        if (source.isNotEmpty()) {
+            recentReads.addLast(source)
+            while (recentReads.size > 4) recentReads.removeFirst()
+        }
 
         // Üres kép: marad az utolsó fordítás. Ugyanaz a felirat: nincs újrafordítás (nem villog).
         if (source.isEmpty() || similar(source, lastSource)) {
@@ -326,27 +450,32 @@ class MainActivity : AppCompatActivity() {
             return
         }
         // Új szöveg: csak akkor fordítjuk, ha két egymás utáni képen is ugyanaz
-        // (így a beúszó/félig olvasott feliratok nem okoznak szemetet)
         if (!similar(source, candidate)) {
             candidate = source
             busy.set(false)
             return
         }
         candidate = ""
-        lastSource = source
-        sourceText.text = source
-        translateBlocks(blocks)
+
+        // Az utolsó leolvasások közül a leggyakoribb változat (egy elmosódott kép nem ront el szót)
+        val best = recentReads.filter { similar(it, source) }
+            .groupingBy { it }.eachCount()
+            .maxByOrNull { it.value }?.takeIf { it.value >= 2 }?.key ?: source
+        val finalBlocks = if (best == source) blocks else best.split("\n")
+
+        lastSource = best
+        sourceText.text = best
+        if (recording && (recLines.isEmpty() || !similar(recLines.last(), best))) recLines.add(best)
+        translateBlocks(finalBlocks)
     }
 
     // ---------- Szöveg tisztítása (szövegfelismerési hibák javítása) ----------
 
     private data class Line(val speaker: String?, val body: String)
 
-    // "Ruth Singer: szöveg" -> beszélő + szöveg (a név nem megy a fordítóba)
     private val speakerRegex =
         Regex("^([A-Z][\\p{L}'.\\-]*(?:\\s[A-Z][\\p{L}'.\\-]*){0,3})\\s*:\\s*(.+)$")
 
-    // Gyakori szavak "I" után: a felismerő az "I"-t gyakran "l"-nek olvassa és hozzáragasztja
     private val wordsAfterI = setOf(
         "appreciate", "am", "have", "had", "will", "would", "think", "know", "need", "want",
         "can", "can't", "cannot", "don't", "didn't", "do", "did", "was", "wasn't", "must",
@@ -357,11 +486,16 @@ class MainActivity : AppCompatActivity() {
         "i'm", "i've", "i'll", "i'd", "imagine", "recommend", "apologize", "suggest", "expect"
     )
 
+    private val realLWords = setOf(
+        "like", "let", "look", "last", "long", "list", "left", "life", "lot", "love", "line", "less",
+        "late", "led", "lay", "law", "low", "lost", "lead", "land", "luck", "lady", "lord", "into",
+        "idea", "item", "isle", "ice", "icy", "ill", "its", "inn", "ink"
+    )
+
     private fun fixGluedI(rest: String): String? {
         val r = rest.lowercase()
         if (r in wordsAfterI) return r
         if (r.length >= 6) {
-            // kis eltérés is elfogadható (pl. "apreclate" -> "appreciate")
             val best = wordsAfterI.filter { it.length >= 6 }.minByOrNull { levenshtein(it, r) }
             if (best != null && levenshtein(best, r) <= 2) return best
         }
@@ -369,19 +503,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun cleanup(s: String): String {
-        // ékezetek le (angol szövegben nincs ékezet: "timé" -> "time")
         var t = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
             .replace(Regex("\\p{Mn}+"), "")
             .replace('’', '\'').replace('‘', '\'')
-        // "Singer:lappreciate" -> "Singer: lappreciate"
         t = t.replace(Regex("(?<=[A-Za-z]):(?=\\S)"), ": ")
-        // "lappreciate" / "Iappreciate" -> "I appreciate"
         t = Regex("\\b[lI1]([a-z']{2,})\\b").replace(t) { m ->
-            if (m.value.lowercase() in setOf("like", "let", "look", "last", "long", "list", "left", "life", "lot", "love", "line", "less", "late", "led", "lay", "law", "low", "lost", "lead", "land", "luck", "lady", "lord", "into", "idea", "item", "isle")) {
-                m.value
-            } else {
-                fixGluedI(m.groupValues[1])?.let { "I $it" } ?: m.value
-            }
+            if (m.value.lowercase() in realLWords) m.value
+            else fixGluedI(m.groupValues[1])?.let { "I $it" } ?: m.value
         }
         return t.replace(Regex("\\s+"), " ").trim()
     }
@@ -391,32 +519,41 @@ class MainActivity : AppCompatActivity() {
         return Line(m.groupValues[1], m.groupValues[2])
     }
 
-    // ---------- Fordítás: azonnal offline, utána pontosabb online ----------
+    private fun displayText(ln: Line) = ln.speaker?.let { "$it: ${ln.body}" } ?: ln.body
 
-    private val netExecutor: ExecutorService = Executors.newSingleThreadExecutor()
-    private val onlineCache = object : LinkedHashMap<String, String>(64, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 300
-    }
+    private fun wordCount(s: String) = s.split(' ').count { it.any(Char::isLetter) }
 
-    private fun showLines(lines: List<Line>, tr: List<String>, online: Boolean) {
+    // ---------- Fordítás: azonnal offline -> Google -> (ha kint marad) Gemini ----------
+
+    private fun showLines(lines: List<Line>, tr: List<String>, engine: String) {
         translatedText.text = lines.indices.joinToString("\n") { i ->
             lines[i].speaker?.let { "$it: ${tr[i]}" } ?: tr[i]
         }
-        // fehér = pontos online fordítás, szürkés = gyors offline fordítás
-        translatedText.setTextColor(if (online) Color.WHITE else Color.rgb(190, 190, 190))
+        // szürkés = gyors offline, fehér = online (Google / Gemini)
+        translatedText.setTextColor(if (engine == "offline") Color.rgb(190, 190, 190) else Color.WHITE)
+        sourceText.text = if (engine == "offline") lastSource else "$lastSource   [$engine]"
+        if (recording) recTranslations[lastSource] = translatedText.text.toString()
     }
 
     private fun translateBlocks(blocks: List<String>) {
         val key = blocks.joinToString("\n")
         val lines = blocks.map { splitSpeaker(it) }
 
-        // Ha online már megvan, azonnal azt mutatjuk
-        val onlineHit = lines.map { onlineCache[it.body] }
-        if (onlineHit.all { it != null }) {
-            showLines(lines, onlineHit.map { it!! }, online = true)
-            busy.set(false)
-            return
+        val history = recentHistory.toList()
+        lines.forEach { recentHistory.addLast(displayText(it)) }
+        while (recentHistory.size > 4) recentHistory.removeFirst()
+
+        // Már lefordítottuk korábban?
+        geminiCache[key]?.let { cached ->
+            val parts = cached.split("\n")
+            if (parts.size == lines.size) {
+                geminiShownFor = key
+                showLines(lines, parts, "Gemini")
+                busy.set(false)
+                return
+            }
         }
+        val googleHit = lines.map { googleCache[it.body] }
 
         val results = arrayOfNulls<String>(lines.size)
         var remaining = lines.size
@@ -424,21 +561,25 @@ class MainActivity : AppCompatActivity() {
         fun finishOne() {
             remaining--
             if (remaining == 0) {
-                showLines(lines, results.map { it ?: "" }, online = false)
+                if (googleHit.all { it != null }) {
+                    showLines(lines, googleHit.map { it!! }, "Google")
+                } else {
+                    showLines(lines, results.map { it ?: "" }, "offline")
+                }
                 busy.set(false)
-                requestOnline(lines, onlineHit, key)
+                requestOnline(lines, googleHit, key, history)
             }
         }
 
         lines.forEachIndexed { i, ln ->
-            val cached = cache[ln.body]
+            val cached = offlineCache[ln.body]
             if (cached != null) {
                 results[i] = cached
                 finishOne()
             } else {
                 translator.translate(ln.body)
                     .addOnSuccessListener { tr ->
-                        cache[ln.body] = tr
+                        offlineCache[ln.body] = tr
                         results[i] = tr
                         finishOne()
                     }
@@ -450,65 +591,56 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private val recentHistory = ArrayDeque<String>()   // utolsó feliratok a Gemini-nek (háttér)
-    @Volatile private var geminiPausedUntil = 0L
-    @Volatile private var lastGeminiError = ""
-
-    private fun displayText(ln: Line) = ln.speaker?.let { "$it: ${ln.body}" } ?: ln.body
-
     private fun useGemini(): Boolean =
-        prefs.getString("engine", "gemini") == "gemini" &&
-            !prefs.getString("geminiKey", "").isNullOrBlank()
+        prefs.getString("engine", "gemini") == "gemini" && Gemini.apiKey(this).isNotEmpty()
 
-    private fun requestOnline(lines: List<Line>, cached: List<String?>, key: String) {
-        val history = recentHistory.toList()
-        lines.forEach { recentHistory.addLast(displayText(it)) }
-        while (recentHistory.size > 4) recentHistory.removeFirst()
+    private fun requestOnline(lines: List<Line>, googleHit: List<String?>, key: String, history: List<String>) {
+        // 1) Google azonnal (gyors, nincs kerete)
+        if (googleHit.any { it == null }) {
+            netExecutor.execute {
+                val out = lines.indices.map { i -> googleHit[i] ?: googleTranslate(lines[i].body) }
+                if (out.any { it == null }) return@execute   // nincs internet: marad az offline
+                runOnUiThread {
+                    lines.forEachIndexed { i, ln -> googleCache[ln.body] = out[i]!! }
+                    if (key == lastSource && geminiShownFor != key) showLines(lines, out.map { it!! }, "Google")
+                }
+            }
+        }
 
-        netExecutor.execute {
-            var engine = ""
-            val out = lines.indices.map { i ->
-                cached[i] ?: run {
-                    val g = if (useGemini()) geminiTranslate(lines[i].body, lines[i].speaker, history) else null
-                    if (g != null) {
-                        engine = "Gemini"
-                        g
-                    } else {
-                        if (engine.isEmpty()) engine = if (useGemini()) "Google (Gemini hiba: $lastGeminiError)" else "Google"
-                        googleTranslate(lines[i].body)
+        // 2) Gemini csak akkor, ha érdemes: van hosszabb mondat, és a felirat fél másodpercig kint marad.
+        //    Egy feliratváltás = egyetlen kérés (a sorokat együtt küldjük), így kímélj a keretet.
+        if (!useGemini() || lines.none { wordCount(it.body) > 3 }) return
+        mainHandler.postDelayed({
+            if (key != lastSource) return@postDelayed   // közben jött új felirat: nem kérdezzük
+            netExecutor.execute {
+                val tr = geminiTranslate(lines, history)
+                runOnUiThread {
+                    if (tr != null) {
+                        geminiCache[key] = tr.joinToString("\n")
+                        if (key == lastSource) {
+                            geminiShownFor = key
+                            showLines(lines, tr, "Gemini")
+                        }
+                    } else if (key == lastSource) {
+                        sourceText.text = "$lastSource   [Google · Gemini: ${Gemini.lastError}]"
                     }
                 }
             }
-            if (out.any { it == null }) return@execute   // nincs internet: marad az offline
-            runOnUiThread {
-                lines.forEachIndexed { i, ln -> onlineCache[ln.body] = out[i]!! }
-                // csak akkor cseréljük, ha közben nem jött új felirat
-                if (key == lastSource) {
-                    showLines(lines, out.map { it!! }, online = true)
-                    if (engine.isNotEmpty()) sourceText.text = "$key   [$engine]"
-                }
-            }
-        }
+        }, 600)
     }
 
-    /** Gemini fordítás a játék és az előző feliratok ismeretében. Hiba esetén null (-> Google). */
-    private fun geminiTranslate(body: String, speaker: String?, history: List<String>): String? {
-        val apiKey = prefs.getString("geminiKey", "").orEmpty().trim()
-        if (apiKey.isEmpty() || System.currentTimeMillis() < geminiPausedUntil) {
-            if (apiKey.isNotEmpty()) lastGeminiError = "napi/percenkénti keret"
-            return null
-        }
-        val model = prefs.getString("geminiModel", DEFAULT_MODEL).orEmpty().trim().ifEmpty { DEFAULT_MODEL }
-        val game = prefs.getString("game", "").orEmpty().trim()
-
-        val sys = buildString {
+    /** Egy feliratváltás összes sora egyetlen Gemini-kérésben. Hiba vagy rossz sorszám esetén null. */
+    private fun geminiTranslate(lines: List<Line>, history: List<String>): List<String>? {
+        val game = Gemini.game(this)
+        val system = buildString {
             append("Videójáték-feliratokat fordítasz angolról magyarra.")
             if (game.isNotEmpty()) append(" A játék: $game.")
             append(" Természetes, gördülékeny, beszélt magyar nyelven fordíts, ne szó szerint.")
             append(" A szöveg kamerás szövegfelismeréssel készült, lehetnek benne betűhibák: értelemszerűen javítsd őket.")
             append(" A személyneveket, helyneveket és a játék saját kifejezéseit hagyd eredetiben,")
             append(" kivéve ha a játék magyar változatában bevett fordításuk van.")
-            append(" Csak a fordított feliratot írd ki, magyarázat, idézőjel és a beszélő neve nélkül.")
+            append(" Pontosan annyi sort adj vissza, ahány sort kaptál, ugyanabban a sorrendben, sorszám nélkül.")
+            append(" Csak a fordítást írd, magyarázat, idézőjel és a beszélő neve nélkül.")
         }
         val user = buildString {
             if (history.isNotEmpty()) {
@@ -516,116 +648,21 @@ class MainActivity : AppCompatActivity() {
                 history.forEach { append("- ").append(it).append('\n') }
                 append('\n')
             }
-            if (speaker != null) append("Beszélő: ").append(speaker).append('\n')
-            append("Fordítandó felirat:\n").append(body)
-        }
-
-        for (attempt in 0..1) {
-            val gen = JSONObject().put("temperature", 0.2).put("maxOutputTokens", 400)
-            if (attempt == 0) gen.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
-            val req = JSONObject()
-                .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", sys))))
-                .put("contents", JSONArray().put(
-                    JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", user)))
-                ))
-                .put("generationConfig", gen)
-            try {
-                val c = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
-                    .openConnection() as HttpURLConnection
-                c.requestMethod = "POST"
-                c.doOutput = true
-                c.connectTimeout = 4000
-                c.readTimeout = 6000
-                c.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                c.setRequestProperty("x-goog-api-key", apiKey)
-                c.outputStream.use { it.write(req.toString().toByteArray(Charsets.UTF_8)) }
-                val code = c.responseCode
-                if (code == 200) {
-                    val json = JSONObject(c.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() })
-                    c.disconnect()
-                    val parts = json.optJSONArray("candidates")?.optJSONObject(0)
-                        ?.optJSONObject("content")?.optJSONArray("parts") ?: return null
-                    val sb = StringBuilder()
-                    for (i in 0 until parts.length()) {
-                        val part = parts.optJSONObject(i) ?: continue
-                        if (part.optBoolean("thought", false)) continue
-                        sb.append(part.optString("text", ""))
-                    }
-                    lastGeminiError = ""
-                    return sb.toString().trim().trim('"', '„', '”').ifEmpty { null }
-                }
-                c.errorStream?.close()
-                c.disconnect()
-                if (code == 400 && attempt == 0) continue   // pl. a modell nem ismeri a thinkingConfig-ot
-                lastGeminiError = when (code) {
-                    400, 401, 403 -> "rossz kulcs? ($code)"
-                    404 -> "ismeretlen modell"
-                    429 -> "keret elfogyott"
-                    else -> "$code"
-                }
-                if (code == 429) geminiPausedUntil = System.currentTimeMillis() + 60_000
-                return null
-            } catch (e: Exception) {
-                lastGeminiError = "időtúllépés"
-                return null
+            append("Fordítandó sorok (${lines.size} db):\n")
+            lines.forEach { ln ->
+                if (ln.speaker != null) append("[").append(ln.speaker).append("] ")
+                append(ln.body).append('\n')
             }
         }
-        return null
-    }
-
-    private fun openSettings() {
-        val pad = (16 * resources.displayMetrics.density).toInt()
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(pad, pad / 2, pad, 0)
+        val text = Gemini.generate(this, system, user, 500, 6000) ?: return null
+        var out = text.split('\n').map { it.trim() }.filter { it.isNotEmpty() }
+            .map { it.replace(Regex("^(\\d+[.)]\\s*|-\\s+|\\[[^\\]]*\\]\\s*)"), "").trim('"', '„', '”') }
+        if (lines.size == 1 && out.size > 1) out = listOf(out.joinToString(" "))
+        if (out.size != lines.size) {
+            Gemini.lastError = "eltérő sorszám"
+            return null
         }
-        val rGemini = RadioButton(this).apply { id = View.generateViewId(); text = "Gemini (pontosabb, kulcs kell)" }
-        val rGoogle = RadioButton(this).apply { id = View.generateViewId(); text = "Google Fordító" }
-        val group = RadioGroup(this).apply { addView(rGemini); addView(rGoogle) }
-        group.check(if (prefs.getString("engine", "gemini") == "google") rGoogle.id else rGemini.id)
-
-        val keyEdit = EditText(this).apply {
-            hint = "Gemini API-kulcs (másold be)"
-            isSingleLine = true
-            setText(prefs.getString("geminiKey", ""))
-        }
-        val help = TextView(this).apply {
-            text = "Ingyenes kulcs: aistudio.google.com → Get API key"
-            textSize = 12f
-        }
-        val gameEdit = EditText(this).apply {
-            hint = "Játék neve (pl. Hogwarts Legacy)"
-            isSingleLine = true
-            setText(prefs.getString("game", ""))
-        }
-        val modelLabel = TextView(this).apply {
-            text = "Gemini modell (haladó, hagyd így)"
-            textSize = 12f
-            setPadding(0, pad / 2, 0, 0)
-        }
-        val modelEdit = EditText(this).apply {
-            isSingleLine = true
-            setText(prefs.getString("geminiModel", DEFAULT_MODEL))
-        }
-        listOf(group, keyEdit, help, gameEdit, modelLabel, modelEdit).forEach { box.addView(it) }
-
-        AlertDialog.Builder(this)
-            .setTitle("Fordítás beállításai")
-            .setView(ScrollView(this).apply { addView(box) })
-            .setPositiveButton("Mentés") { _, _ ->
-                prefs.edit()
-                    .putString("engine", if (group.checkedRadioButtonId == rGoogle.id) "google" else "gemini")
-                    .putString("geminiKey", keyEdit.text.toString().trim())
-                    .putString("game", gameEdit.text.toString().trim())
-                    .putString("geminiModel", modelEdit.text.toString().trim().ifEmpty { DEFAULT_MODEL })
-                    .apply()
-                onlineCache.clear()
-                geminiPausedUntil = 0L
-                lastGeminiError = ""
-                lastSource = ""   // a következő feliratot újrafordítja
-            }
-            .setNegativeButton("Mégse", null)
-            .show()
+        return out
     }
 
     /** Google Fordító (online, kulcs nélkül). Hiba vagy internet hiánya esetén null. */
@@ -656,6 +693,109 @@ class MainActivity : AppCompatActivity() {
             null
         }
     }
+
+    // ---------- Felvétel ----------
+
+    private fun toggleRecording() {
+        if (!recording) {
+            recording = true
+            recStart = System.currentTimeMillis()
+            recLines.clear()
+            recTranslations.clear()
+            if (lastSource.isNotEmpty()) {
+                recLines.add(lastSource)
+                recTranslations[lastSource] = translatedText.text.toString()
+            }
+            recBtn.text = "■ Stop"
+            recBtn.backgroundTintList = ColorStateList.valueOf(Color.rgb(198, 40, 40))
+            recBtn.setTextColor(Color.WHITE)
+            Toast.makeText(this, "Felvétel elindult", Toast.LENGTH_SHORT).show()
+        } else {
+            recording = false
+            recBtn.text = "● Rec"
+            recBtn.backgroundTintList = recDefaultTint
+            if (recLines.isEmpty()) {
+                Toast.makeText(this, "Nem volt felirat a felvételben", Toast.LENGTH_SHORT).show()
+                return
+            }
+            val id = System.currentTimeMillis()
+            val arr = JSONArray()
+            recLines.forEach { en ->
+                arr.put(JSONObject().put("en", en).put("hu", recTranslations[en] ?: ""))
+            }
+            val session = JSONObject()
+                .put("id", id)
+                .put("start", recStart)
+                .put("end", id)
+                .put("game", Gemini.game(this))
+                .put("lines", arr)
+                .put("summary", "")
+            SessionStore.add(this, session)
+            val intent = Intent(this, SummaryActivity::class.java)
+            if (Gemini.apiKey(this).isNotEmpty()) intent.putExtra("autoSummarize", id)
+            startActivity(intent)
+        }
+    }
+
+    // ---------- Beállítások ----------
+
+    private fun openSettings() {
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, 0)
+        }
+        val rGemini = RadioButton(this).apply { id = View.generateViewId(); text = "Gemini (pontosabb, kulcs kell)" }
+        val rGoogle = RadioButton(this).apply { id = View.generateViewId(); text = "Google Fordító" }
+        val group = RadioGroup(this).apply { addView(rGemini); addView(rGoogle) }
+        group.check(if (prefs.getString("engine", "gemini") == "google") rGoogle.id else rGemini.id)
+
+        val keyEdit = EditText(this).apply {
+            hint = "Gemini API-kulcs (másold be)"
+            isSingleLine = true
+            setText(prefs.getString("geminiKey", ""))
+        }
+        val help = TextView(this).apply {
+            text = "Ingyenes kulcs: aistudio.google.com/apikey"
+            textSize = 12f
+        }
+        val gameEdit = EditText(this).apply {
+            hint = "Játék neve (pl. Hogwarts Legacy)"
+            isSingleLine = true
+            setText(prefs.getString("game", ""))
+        }
+        val modelLabel = TextView(this).apply {
+            text = "Gemini modell (haladó, hagyd így)"
+            textSize = 12f
+            setPadding(0, pad / 2, 0, 0)
+        }
+        val modelEdit = EditText(this).apply {
+            isSingleLine = true
+            setText(prefs.getString("geminiModel", Gemini.DEFAULT_MODEL))
+        }
+        listOf(group, keyEdit, help, gameEdit, modelLabel, modelEdit).forEach { box.addView(it) }
+
+        AlertDialog.Builder(this)
+            .setTitle("Fordítás beállításai")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Mentés") { _, _ ->
+                prefs.edit()
+                    .putString("engine", if (group.checkedRadioButtonId == rGoogle.id) "google" else "gemini")
+                    .putString("geminiKey", keyEdit.text.toString().trim())
+                    .putString("game", gameEdit.text.toString().trim())
+                    .putString("geminiModel", modelEdit.text.toString().trim().ifEmpty { Gemini.DEFAULT_MODEL })
+                    .apply()
+                geminiCache.clear()
+                geminiShownFor = ""
+                Gemini.pausedUntil = 0L
+                Gemini.lastError = ""
+                lastSource = ""   // a következő feliratot újrafordítja
+            }
+            .setNegativeButton("Mégse", null)
+            .show()
+    }
+
+    // ---------- Segédfüggvények ----------
 
     /** Két szöveg "ugyanaz-e" (a szövegfelismerés apró eltéréseit elnézve). */
     private fun similar(a: String, b: String): Boolean {
@@ -692,7 +832,6 @@ class MainActivity : AppCompatActivity() {
         0L
     }
 
-    /** Indításkor megnézi, van-e újabb kiadás a GitHub-on. */
     private fun checkForUpdate() {
         Thread {
             try {
@@ -793,6 +932,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        mainHandler.removeCallbacksAndMessages(null)
         analysisExecutor.shutdown()
         netExecutor.shutdown()
         recognizer.close()
