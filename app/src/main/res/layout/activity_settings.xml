@@ -273,16 +273,22 @@
                     android:padding="16dp">
 
                     <com.google.android.material.radiobutton.MaterialRadioButton
+                        android:id="@+id/readScreen"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Képernyőről – azt olvassa, amit az élő képen látsz (ajánlott)" />
+
+                    <com.google.android.material.radiobutton.MaterialRadioButton
                         android:id="@+id/readPhoto"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="Fényképes – éles fotókból olvas, lassabb (Takarékos módhoz)" />
+                        android:text="Fényképes – teljes felbontású fotókból, lassabb" />
 
                     <com.google.android.material.radiobutton.MaterialRadioButton
                         android:id="@+id/readVideo"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="Gyors – videóképből olvas (ajánlott)" />
+                        android:text="Videóképből – sok telefonon kis felbontású" />
                 </RadioGroup>
             </com.google.android.material.card.MaterialCardView>
 

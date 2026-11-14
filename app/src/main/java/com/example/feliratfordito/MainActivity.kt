@@ -108,7 +108,7 @@ class MainActivity : AppCompatActivity() {
 
     private var imageCapture: ImageCapture? = null
     private val capturing = AtomicBoolean(false)
-    private var readMode = "video"   // photo = éles fényképekből (pontos), video = videóképből (gyors)
+    private var readMode = "screen"   // photo = éles fényképekből (pontos), video = videóképből (gyors)
 
     private var camera: Camera? = null
     private lateinit var analysisExecutor: ExecutorService
@@ -241,11 +241,11 @@ class MainActivity : AppCompatActivity() {
             }
 
         analysisExecutor = Executors.newSingleThreadExecutor()
-        if (!prefs.getBoolean("readModeV2", false)) {
-            // új alapértelmezés: gyors videós leolvasás (a pontosságot Profi módban a Gemini adja)
-            prefs.edit().putString("readMode", "video").putBoolean("readModeV2", true).apply()
+        if (!prefs.getBoolean("readModeV3", false)) {
+            // új alapértelmezés: a képernyőn látható képből olvasunk (a videókép sok telefonon kis felbontású)
+            prefs.edit().putString("readMode", "screen").putBoolean("readModeV3", true).apply()
         }
-        readMode = prefs.getString("readMode", "video") ?: "video"
+        readMode = prefs.getString("readMode", "screen") ?: "screen"
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
@@ -329,7 +329,7 @@ class MainActivity : AppCompatActivity() {
             lastSource = ""
         }
         settingsVer = v
-        val m = prefs.getString("readMode", "video") ?: "video"
+        val m = prefs.getString("readMode", "screen") ?: "screen"
         if (m != readMode) {
             readMode = m
             if (camera != null) startCamera()
@@ -372,15 +372,29 @@ class MainActivity : AppCompatActivity() {
                 val rot = previewView.display?.rotation ?: Surface.ROTATION_0
                 val preview = Preview.Builder()
                     .setTargetRotation(rot)
-                    .setResolutionSelector(ResolutionSelector.Builder().setAspectRatioStrategy(aspect).build())
+                    .setResolutionSelector(
+                        ResolutionSelector.Builder()
+                            .setAspectRatioStrategy(aspect)
+                            .setResolutionStrategy(
+                                ResolutionStrategy(Size(3840, 2160), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER)
+                            )
+                            .build()
+                    )
                     .build()
                 preview.setSurfaceProvider(previewView.surfaceProvider)
 
                 this.preview = preview
                 provider.unbindAll()
                 mainHandler.removeCallbacks(captureTick)
+                mainHandler.removeCallbacks(screenTick)
 
-                if (readMode == "photo") {
+                if (readMode == "screen") {
+                    // Képernyőről olvasás: pontosan azt a képet olvassuk, amit az élő képen látsz
+                    imageCapture = null
+                    analysis = null
+                    camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, group(preview))
+                    mainHandler.postDelayed(screenTick, 600)
+                } else if (readMode == "photo") {
                     // Pontos mód: folyamatos, a lehető legnagyobb felbontású fényképek
                     val ic = ImageCapture.Builder()
                         .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
@@ -517,7 +531,7 @@ class MainActivity : AppCompatActivity() {
         // Elmosódott képkocka (bemozdulás, fókuszálás): kihagyjuk, ha nemrég volt jobb
         val sharp = try { sharpness(crop) } catch (e: Exception) { 0.0 }
         val nowMs = System.currentTimeMillis()
-        if (readMode == "video" && sharpAvg > 0 && sharp < sharpAvg * 0.6 && nowMs - lastOcrAt < 700) {
+        if (readMode != "photo" && sharpAvg > 0 && sharp < sharpAvg * 0.6 && nowMs - lastOcrAt < 700) {
             sharpAvg = sharpAvg * 0.95 + sharp * 0.05
             return
         }
@@ -532,6 +546,41 @@ class MainActivity : AppCompatActivity() {
         recognizer.process(InputImage.fromBitmap(input, 0))
             .addOnSuccessListener { result -> handleText(result, map) }
             .addOnFailureListener { busy.set(false) }
+    }
+
+    // ---------- Képernyőről olvasás (alapértelmezett) ----------
+
+    @Volatile private var lastCropInfo = ""
+
+    private val screenTick = object : Runnable {
+        override fun run() {
+            if (readMode != "screen") return
+            if (camera != null && translatorReady && !busy.get() && !capturing.get() && viewW > 0) {
+                val full: Bitmap? = try { previewView.bitmap } catch (e: Exception) { null }
+                if (full != null) {
+                    val sx = full.width.toFloat() / previewView.width
+                    val sy = full.height.toFloat() / previewView.height
+                    val r = cropNorm
+                    val x = (r.left * previewView.width * sx).toInt().coerceIn(0, full.width - 2)
+                    val y = (r.top * previewView.height * sy).toInt().coerceIn(0, full.height - 2)
+                    val w = ((r.right - r.left) * previewView.width * sx).toInt().coerceIn(2, full.width - x)
+                    val h = ((r.bottom - r.top) * previewView.height * sy).toInt().coerceIn(2, full.height - y)
+                    val crop = Bitmap.createBitmap(full, x, y, w, h)
+                    // a kivágás képpontjai -> nézet koordináták
+                    val map = CropMap(x.toFloat(), y.toFloat(), 1f / sx, 0f, 0f)
+                    lastCropInfo = "${w}×${h} px"
+                    capturing.set(true)
+                    analysisExecutor.execute {
+                        try {
+                            processCrop(crop, 0, map, 1.2f)
+                        } finally {
+                            capturing.set(false)
+                        }
+                    }
+                }
+            }
+            mainHandler.postDelayed(this, 120)
+        }
     }
 
     // ---------- Pontos mód: folyamatos, nagy felbontású fényképek ----------
@@ -863,7 +912,8 @@ class MainActivity : AppCompatActivity() {
         translatedText.text = texts.joinToString("\n")
         // szürkés = gyors offline, fehér = online (Google / Gemini)
         translatedText.setTextColor(if (engine == "offline") Color.rgb(190, 190, 190) else Color.WHITE)
-        sourceText.text = if (engine == "offline") lastSource else "$lastSource   [$engine]"
+        val info = if (lastCropInfo.isNotEmpty()) " · $lastCropInfo" else ""
+        sourceText.text = if (engine == "offline") "$lastSource   [offline$info]" else "$lastSource   [$engine$info]"
         if (recording) recTranslations[lastSource] = translatedText.text.toString()
     }
 
