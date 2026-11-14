@@ -3,7 +3,7 @@ package com.example.feliratfordito
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -20,19 +20,17 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.Size
 import android.util.TypedValue
+import android.view.Gravity
+import android.view.Surface
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.RadioButton
-import android.widget.RadioGroup
-import android.widget.ScrollView
+import android.widget.FrameLayout
+import android.widget.PopupMenu
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
@@ -51,6 +49,8 @@ import androidx.core.content.FileProvider
 import androidx.core.content.pm.PackageInfoCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.google.android.material.card.MaterialCardView
+import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.Translation
@@ -85,9 +85,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var sourceText: TextView
     private lateinit var statusText: TextView
     private lateinit var zoomBar: SeekBar
+    private lateinit var statusCard: MaterialCardView
+    private lateinit var translationCard: MaterialCardView
     private lateinit var updateBtn: Button
-    private lateinit var recBtn: Button
-    private var recDefaultTint: ColorStateList? = null
+    private lateinit var recFab: FloatingActionButton
+    private lateinit var recIndicator: TextView
+    private var preview: Preview? = null
+    private var analysis: ImageAnalysis? = null
+    private var settingsVer = -1
 
     private var camera: Camera? = null
     private lateinit var analysisExecutor: ExecutorService
@@ -149,34 +154,25 @@ class MainActivity : AppCompatActivity() {
         translatedText = findViewById(R.id.translatedText)
         sourceText = findViewById(R.id.sourceText)
         statusText = findViewById(R.id.statusText)
+        statusCard = findViewById(R.id.statusCard)
+        translationCard = findViewById(R.id.translationCard)
         zoomBar = findViewById(R.id.zoomBar)
         updateBtn = findViewById(R.id.updateBtn)
-        recBtn = findViewById(R.id.recBtn)
-        recDefaultTint = recBtn.backgroundTintList
+        recFab = findViewById(R.id.recFab)
+        recIndicator = findViewById(R.id.recIndicator)
 
         updateBtn.setOnClickListener { startUpdate() }
-        recBtn.setOnClickListener { toggleRecording() }
-        findViewById<Button>(R.id.summaryBtn).setOnClickListener {
-            startActivity(Intent(this, SummaryActivity::class.java))
-        }
-        findViewById<Button>(R.id.settingsBtn).setOnClickListener { openSettings() }
-        statusText.setOnClickListener { if (translatorReady) statusText.visibility = View.GONE }
+        recFab.setOnClickListener { toggleRecording() }
+        findViewById<View>(R.id.menuBtn).setOnClickListener { v -> showMenu(v) }
+        statusCard.setOnClickListener { if (translatorReady) statusCard.visibility = View.GONE }
 
-        // Mentett beállítások
-        cropNorm = RectF(
-            prefs.getFloat("l", 0.1f), prefs.getFloat("t", 0.6f),
-            prefs.getFloat("r", 0.9f), prefs.getFloat("b", 0.85f)
-        )
-        textSizeSp = prefs.getFloat("meret", 26f)
-        translatedText.setTextSize(TypedValue.COMPLEX_UNIT_SP, textSizeSp)
+        cropNorm = loadBox()
         zoomBar.progress = prefs.getInt("zoom", 0)
-        sourceText.visibility = if (prefs.getBoolean("angol", true)) View.VISIBLE else View.GONE
 
         boxView.setBox(cropNorm)
         boxView.onBoxChanged = { r ->
             cropNorm = RectF(r)
-            prefs.edit().putFloat("l", r.left).putFloat("t", r.top)
-                .putFloat("r", r.right).putFloat("b", r.bottom).apply()
+            saveBox(r)
             // élesség és fénymérés a keret új helyére (kis késleltetéssel)
             mainHandler.removeCallbacks(focusNow)
             mainHandler.postDelayed(focusNow, 400)
@@ -192,20 +188,10 @@ class MainActivity : AppCompatActivity() {
                 camera?.cameraControl?.setLinearZoom(progress / 100f)
             }
             override fun onStartTrackingTouch(sb: SeekBar?) {}
-            override fun onStopTrackingTouch(sb: SeekBar?) {
-                prefs.edit().putInt("zoom", zoomBar.progress).apply()
-                mainHandler.removeCallbacks(focusNow)
-                mainHandler.postDelayed(focusNow, 300)
-            }
+            override fun onStopTrackingTouch(sb: SeekBar?) = zoomChanged()
         })
-
-        findViewById<Button>(R.id.smallerBtn).setOnClickListener { changeTextSize(-2f) }
-        findViewById<Button>(R.id.biggerBtn).setOnClickListener { changeTextSize(2f) }
-        findViewById<Button>(R.id.toggleEnBtn).setOnClickListener {
-            val show = sourceText.visibility != View.VISIBLE
-            sourceText.visibility = if (show) View.VISIBLE else View.GONE
-            prefs.edit().putBoolean("angol", show).apply()
-        }
+        findViewById<View>(R.id.zoomOut).setOnClickListener { zoomBar.progress = (zoomBar.progress - 10).coerceAtLeast(0); zoomChanged() }
+        findViewById<View>(R.id.zoomIn).setOnClickListener { zoomBar.progress = (zoomBar.progress + 10).coerceAtMost(100); zoomChanged() }
 
         recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
         translator = Translation.getClient(
@@ -219,7 +205,7 @@ class MainActivity : AppCompatActivity() {
         translator.downloadModelIfNeeded(DownloadConditions.Builder().build())
             .addOnSuccessListener {
                 translatorReady = true
-                statusText.visibility = View.GONE
+                statusCard.visibility = View.GONE
             }
             .addOnFailureListener { e ->
                 showStatus("A fordítási modell letöltése nem sikerült (${e.message}).\nKapcsolj be internetet, és indítsd újra az appot.")
@@ -237,13 +223,102 @@ class MainActivity : AppCompatActivity() {
 
     private fun showStatus(msg: String) {
         statusText.text = msg
-        statusText.visibility = View.VISIBLE
+        statusCard.visibility = View.VISIBLE
     }
 
-    private fun changeTextSize(delta: Float) {
-        textSizeSp = (textSizeSp + delta).coerceIn(12f, 60f)
+    private fun zoomChanged() {
+        prefs.edit().putInt("zoom", zoomBar.progress).apply()
+        mainHandler.removeCallbacks(focusNow)
+        mainHandler.postDelayed(focusNow, 300)
+    }
+
+    // ---------- Keret helye: álló és fekvő helyzetben külön megjegyezve ----------
+
+    private fun isPortrait() = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+
+    private fun loadBox(): RectF {
+        val sfx = if (isPortrait()) "_p" else ""
+        val def = if (isPortrait()) RectF(0.05f, 0.55f, 0.95f, 0.68f) else RectF(0.1f, 0.6f, 0.9f, 0.85f)
+        return RectF(
+            prefs.getFloat("l$sfx", def.left), prefs.getFloat("t$sfx", def.top),
+            prefs.getFloat("r$sfx", def.right), prefs.getFloat("b$sfx", def.bottom)
+        )
+    }
+
+    private fun saveBox(r: RectF) {
+        val sfx = if (isPortrait()) "_p" else ""
+        prefs.edit().putFloat("l$sfx", r.left).putFloat("t$sfx", r.top)
+            .putFloat("r$sfx", r.right).putFloat("b$sfx", r.bottom).apply()
+    }
+
+    private fun resetBox() {
+        val sfx = if (isPortrait()) "_p" else ""
+        prefs.edit().remove("l$sfx").remove("t$sfx").remove("r$sfx").remove("b$sfx").apply()
+        cropNorm = loadBox()
+        boxView.setBox(cropNorm)
+        mainHandler.postDelayed(focusNow, 300)
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val rot = previewView.display?.rotation ?: Surface.ROTATION_0
+        preview?.targetRotation = rot
+        analysis?.targetRotation = rot
+        cropNorm = loadBox()
+        boxView.setBox(cropNorm)
+        candidate = ""
+        mainHandler.removeCallbacks(focusNow)
+        mainHandler.postDelayed(focusNow, 600)
+    }
+
+    // ---------- Menü és beállítások ----------
+
+    private fun showMenu(anchor: View) {
+        val pm = PopupMenu(this, anchor)
+        pm.menu.add(0, 1, 0, "Felvételek és összefoglalók")
+        pm.menu.add(0, 2, 1, "Beállítások")
+        pm.menu.add(0, 3, 2, "Keret alaphelyzetbe")
+        pm.menu.add(0, 4, 3, "Súgó")
+        pm.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                1 -> startActivity(Intent(this, SummaryActivity::class.java))
+                2 -> startActivity(Intent(this, SettingsActivity::class.java))
+                3 -> resetBox()
+                4 -> showStatus(
+                    "1. Zoomolj rá a tévére\n2. Húzd a sárga keretet a feliratra\n" +
+                        "3. Felül megjelenik a magyar fordítás\n\n" +
+                        "Piros gomb: beszélgetés felvétele, utána összefoglaló.\n(Koppints ide a bezáráshoz)"
+                )
+            }
+            true
+        }
+        pm.show()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        applyDisplayPrefs()
+        val v = prefs.getInt("settingsVer", 0)
+        if (settingsVer != -1 && v != settingsVer) {
+            // változott a fordító / kulcs / játék: a következő feliratot újrafordítjuk
+            geminiCache.clear()
+            geminiShownFor = ""
+            Gemini.pausedUntil = 0L
+            Gemini.lastError = ""
+            lastSource = ""
+        }
+        settingsVer = v
+    }
+
+    private fun applyDisplayPrefs() {
+        textSizeSp = prefs.getFloat("meret", 26f)
         translatedText.setTextSize(TypedValue.COMPLEX_UNIT_SP, textSizeSp)
-        prefs.edit().putFloat("meret", textSizeSp).apply()
+        sourceText.visibility = if (prefs.getBoolean("angol", true)) View.VISIBLE else View.GONE
+        val lp = translationCard.layoutParams as FrameLayout.LayoutParams
+        val bottom = prefs.getBoolean("panelLent", false)
+        lp.gravity = if (bottom) Gravity.BOTTOM else Gravity.TOP
+        lp.bottomMargin = if (bottom) (120 * resources.displayMetrics.density).toInt() else lp.topMargin
+        translationCard.layoutParams = lp
     }
 
     // ---------- Kamera ----------
@@ -255,13 +330,16 @@ class MainActivity : AppCompatActivity() {
                 val provider = future.get()
                 val aspect = AspectRatioStrategy(AspectRatio.RATIO_16_9, AspectRatioStrategy.FALLBACK_RULE_AUTO)
 
+                val rot = previewView.display?.rotation ?: Surface.ROTATION_0
                 val preview = Preview.Builder()
+                    .setTargetRotation(rot)
                     .setResolutionSelector(ResolutionSelector.Builder().setAspectRatioStrategy(aspect).build())
                     .build()
                 preview.setSurfaceProvider(previewView.surfaceProvider)
 
                 // A lehető legnagyobb felbontás (4K, ha a telefon tudja) – a kis betűkhöz
                 val analysis = ImageAnalysis.Builder()
+                    .setTargetRotation(rot)
                     .setResolutionSelector(
                         ResolutionSelector.Builder()
                             .setAspectRatioStrategy(aspect)
@@ -278,6 +356,8 @@ class MainActivity : AppCompatActivity() {
                     .build()
                 analysis.setAnalyzer(analysisExecutor) { proxy -> analyze(proxy) }
 
+                this.preview = preview
+                this.analysis = analysis
                 provider.unbindAll()
                 camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
                 camera?.cameraControl?.setLinearZoom(zoomBar.progress / 100f)
@@ -696,6 +776,14 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- Felvétel ----------
 
+    private val recTick = object : Runnable {
+        override fun run() {
+            val sec = (System.currentTimeMillis() - recStart) / 1000
+            recIndicator.text = String.format("● FELVÉTEL %02d:%02d  ·  %d felirat", sec / 60, sec % 60, recLines.size)
+            mainHandler.postDelayed(this, 1000)
+        }
+    }
+
     private fun toggleRecording() {
         if (!recording) {
             recording = true
@@ -706,14 +794,15 @@ class MainActivity : AppCompatActivity() {
                 recLines.add(lastSource)
                 recTranslations[lastSource] = translatedText.text.toString()
             }
-            recBtn.text = "■ Stop"
-            recBtn.backgroundTintList = ColorStateList.valueOf(Color.rgb(198, 40, 40))
-            recBtn.setTextColor(Color.WHITE)
+            recFab.setImageResource(R.drawable.ic_stop)
+            recIndicator.visibility = View.VISIBLE
+            mainHandler.post(recTick)
             Toast.makeText(this, "Felvétel elindult", Toast.LENGTH_SHORT).show()
         } else {
             recording = false
-            recBtn.text = "● Rec"
-            recBtn.backgroundTintList = recDefaultTint
+            recFab.setImageResource(R.drawable.ic_rec)
+            recIndicator.visibility = View.GONE
+            mainHandler.removeCallbacks(recTick)
             if (recLines.isEmpty()) {
                 Toast.makeText(this, "Nem volt felirat a felvételben", Toast.LENGTH_SHORT).show()
                 return
@@ -735,64 +824,6 @@ class MainActivity : AppCompatActivity() {
             if (Gemini.apiKey(this).isNotEmpty()) intent.putExtra("autoSummarize", id)
             startActivity(intent)
         }
-    }
-
-    // ---------- Beállítások ----------
-
-    private fun openSettings() {
-        val pad = (16 * resources.displayMetrics.density).toInt()
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(pad, pad / 2, pad, 0)
-        }
-        val rGemini = RadioButton(this).apply { id = View.generateViewId(); text = "Gemini (pontosabb, kulcs kell)" }
-        val rGoogle = RadioButton(this).apply { id = View.generateViewId(); text = "Google Fordító" }
-        val group = RadioGroup(this).apply { addView(rGemini); addView(rGoogle) }
-        group.check(if (prefs.getString("engine", "gemini") == "google") rGoogle.id else rGemini.id)
-
-        val keyEdit = EditText(this).apply {
-            hint = "Gemini API-kulcs (másold be)"
-            isSingleLine = true
-            setText(prefs.getString("geminiKey", ""))
-        }
-        val help = TextView(this).apply {
-            text = "Ingyenes kulcs: aistudio.google.com/apikey"
-            textSize = 12f
-        }
-        val gameEdit = EditText(this).apply {
-            hint = "Játék neve (pl. Hogwarts Legacy)"
-            isSingleLine = true
-            setText(prefs.getString("game", ""))
-        }
-        val modelLabel = TextView(this).apply {
-            text = "Gemini modell (haladó, hagyd így)"
-            textSize = 12f
-            setPadding(0, pad / 2, 0, 0)
-        }
-        val modelEdit = EditText(this).apply {
-            isSingleLine = true
-            setText(prefs.getString("geminiModel", Gemini.DEFAULT_MODEL))
-        }
-        listOf(group, keyEdit, help, gameEdit, modelLabel, modelEdit).forEach { box.addView(it) }
-
-        AlertDialog.Builder(this)
-            .setTitle("Fordítás beállításai")
-            .setView(ScrollView(this).apply { addView(box) })
-            .setPositiveButton("Mentés") { _, _ ->
-                prefs.edit()
-                    .putString("engine", if (group.checkedRadioButtonId == rGoogle.id) "google" else "gemini")
-                    .putString("geminiKey", keyEdit.text.toString().trim())
-                    .putString("game", gameEdit.text.toString().trim())
-                    .putString("geminiModel", modelEdit.text.toString().trim().ifEmpty { Gemini.DEFAULT_MODEL })
-                    .apply()
-                geminiCache.clear()
-                geminiShownFor = ""
-                Gemini.pausedUntil = 0L
-                Gemini.lastError = ""
-                lastSource = ""   // a következő feliratot újrafordítja
-            }
-            .setNegativeButton("Mégse", null)
-            .show()
     }
 
     // ---------- Segédfüggvények ----------
@@ -869,7 +900,7 @@ class MainActivity : AppCompatActivity() {
         downloadedApk?.let { if (it.exists()) { installApk(it); return } }
 
         downloading = true
-        if (translatorReady) statusText.visibility = View.GONE
+        if (translatorReady) statusCard.visibility = View.GONE
         updateBtn.text = "Letöltés…"
         Thread {
             val file = File(File(cacheDir, "updates").apply { mkdirs() }, "FeliratFordito.apk")

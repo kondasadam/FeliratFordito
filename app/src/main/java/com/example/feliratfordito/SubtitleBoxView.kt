@@ -66,7 +66,7 @@ class SubtitleBoxView @JvmOverloads constructor(
         canvas.drawRect(0f, px.top, px.left, px.bottom, dimPaint)
         canvas.drawRect(px.right, px.top, w, px.bottom, dimPaint)
 
-        canvas.drawRect(px, borderPaint)
+        canvas.drawRoundRect(px, 10f * density, 10f * density, borderPaint)
         val rad = 9f * density
         canvas.drawCircle(px.left, px.top, rad, handlePaint)
         canvas.drawCircle(px.right, px.top, rad, handlePaint)

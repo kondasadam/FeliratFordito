@@ -3,7 +3,9 @@ package com.example.feliratfordito
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
-import android.widget.Button
+import com.google.android.material.appbar.MaterialToolbar
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.card.MaterialCardView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -25,13 +27,9 @@ class SummaryActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val scroll = ScrollView(this).apply { setBackgroundColor(Color.rgb(18, 18, 18)) }
-        list = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(24), dp(16), dp(24))
-        }
-        scroll.addView(list)
-        setContentView(scroll)
+        setContentView(R.layout.activity_summary)
+        findViewById<MaterialToolbar>(R.id.toolbar).setNavigationOnClickListener { finish() }
+        list = findViewById(R.id.list)
         render()
 
         val auto = intent.getLongExtra("autoSummarize", -1L)
@@ -42,14 +40,6 @@ class SummaryActivity : AppCompatActivity() {
         list.removeAllViews()
         bodies.clear()
 
-        list.addView(TextView(this).apply {
-            text = "Felvételek és összefoglalók"
-            textSize = 22f
-            setTypeface(typeface, Typeface.BOLD)
-            setTextColor(Color.WHITE)
-            setPadding(0, 0, 0, dp(12))
-        })
-
         val arr = SessionStore.load(this)
         if (arr.length() == 0) {
             list.addView(TextView(this).apply {
@@ -57,6 +47,7 @@ class SummaryActivity : AppCompatActivity() {
                     "a végén nyomd meg a ■ Stop gombot, és itt kapsz róla összefoglalót."
                 setTextColor(Color.LTGRAY)
                 textSize = 16f
+                setPadding(dp(4), dp(8), dp(4), 0)
             })
             return
         }
@@ -72,14 +63,20 @@ class SummaryActivity : AppCompatActivity() {
         val n = lines?.length() ?: 0
         val game = s.optString("game", "")
 
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(30, 42, 56))
-            setPadding(dp(14), dp(12), dp(14), dp(12))
+        val outer = MaterialCardView(this).apply {
+            setCardBackgroundColor(Color.rgb(26, 30, 36))
+            radius = dp(20).toFloat()
+            cardElevation = 0f
+            strokeWidth = 0
         }
         val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         lp.bottomMargin = dp(14)
-        card.layoutParams = lp
+        outer.layoutParams = lp
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(8))
+        }
+        outer.addView(card)
 
         card.addView(TextView(this).apply {
             text = dateFmt.format(Date(s.optLong("start"))) + "  ·  $n felirat" + if (game.isNotEmpty()) "  ·  $game" else ""
@@ -100,21 +97,19 @@ class SummaryActivity : AppCompatActivity() {
         card.addView(body)
 
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        fun btn(label: String, onClick: () -> Unit) = Button(this).apply {
-            text = label
-            isAllCaps = false
-            setOnClickListener { onClick() }
-            val blp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            blp.marginEnd = dp(6)
-            layoutParams = blp
-        }
+        fun btn(label: String, onClick: () -> Unit) =
+            MaterialButton(this, null, androidx.appcompat.R.attr.borderlessButtonStyle).apply {
+                text = label
+                isAllCaps = false
+                setOnClickListener { onClick() }
+            }
         row.addView(btn("Összefoglaló") { summarize(id, force = false) })
         row.addView(btn("Újra") { summarize(id, force = true) })
         row.addView(btn("Szöveg") { showTranscript(id) })
         row.addView(btn("Törlés") { confirmDelete(id) })
         card.addView(row)
 
-        list.addView(card)
+        list.addView(outer)
     }
 
     private fun summarize(id: Long, force: Boolean) {

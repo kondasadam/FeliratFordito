@@ -1,0 +1,8 @@
+<resources>
+    <color name="accent">#FFD54F</color>
+    <color name="bg">#101317</color>
+    <color name="surface">#1A1E24</color>
+    <color name="overlay">#D9161A20</color>
+    <color name="rec_red">#E53935</color>
+    <color name="text_dim">#A8B0BA</color>
+</resources>

@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg"
+    android:fitsSystemWindows="true"
+    android:orientation="vertical">
+
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        app:navigationIcon="@drawable/ic_back"
+        app:title="Beállítások" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <!-- Fordítás -->
+            <TextView style="@style/SectionTitle" android:text="Fordítás" />
+
+            <com.google.android.material.card.MaterialCardView style="@style/SettingsCard">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Fordító"
+                        android:textColor="#FFFFFF"
+                        android:textSize="16sp" />
+
+                    <RadioGroup
+                        android:id="@+id/engineGroup"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content">
+
+                        <com.google.android.material.radiobutton.MaterialRadioButton
+                            android:id="@+id/engineGemini"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Gemini – pontosabb, érti a jelenetet (kulcs kell)" />
+
+                        <com.google.android.material.radiobutton.MaterialRadioButton
+                            android:id="@+id/engineGoogle"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Google Fordító – kulcs nélkül" />
+                    </RadioGroup>
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:hint="Gemini API-kulcs"
+                        app:endIconMode="password_toggle"
+                        app:helperText="Ingyenes kulcs: aistudio.google.com/apikey">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/keyEdit"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="textPassword"
+                            android:singleLine="true" />
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:hint="Játék neve"
+                        app:helperText="Pl. Hogwarts Legacy – így a Gemini tudja, miről szól">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/gameEdit"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="textCapWords"
+                            android:singleLine="true" />
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:hint="Gemini modell (haladó)"
+                        app:helperText="Hagyd így, ha nem tudod, mi ez">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/modelEdit"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="text"
+                            android:singleLine="true" />
+                    </com.google.android.material.textfield.TextInputLayout>
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <!-- Megjelenítés -->
+            <TextView style="@style/SectionTitle" android:text="Megjelenítés" />
+
+            <com.google.android.material.card.MaterialCardView style="@style/SettingsCard">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Betűméret"
+                        android:textColor="#FFFFFF"
+                        android:textSize="16sp" />
+
+                    <com.google.android.material.slider.Slider
+                        android:id="@+id/sizeSlider"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:stepSize="2"
+                        android:value="26"
+                        android:valueFrom="14"
+                        android:valueTo="48" />
+
+                    <TextView
+                        android:id="@+id/sizeSample"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center"
+                        android:paddingBottom="8dp"
+                        android:text="Ruth Singer: Köszönöm, hogy beszéltél velem."
+                        android:textColor="#FFFFFF"
+                        android:textStyle="bold" />
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/enSwitch"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Angol eredeti mutatása a fordítás alatt" />
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/bottomSwitch"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Fordítás a képernyő alján" />
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <!-- Névjegy -->
+            <TextView style="@style/SectionTitle" android:text="Az appról" />
+
+            <com.google.android.material.card.MaterialCardView style="@style/SettingsCard">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <TextView
+                        android:id="@+id/versionText"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textColor="#FFFFFF"
+                        android:textSize="16sp" />
+
+                    <TextView
+                        android:id="@+id/updateInfo"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:textColor="@color/text_dim" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/checkUpdateBtn"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="Frissítés keresése" />
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

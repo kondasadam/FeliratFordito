@@ -1,3 +1,14 @@
 <resources>
-    <style name="Theme.FeliratFordito" parent="Theme.Material3.Dark.NoActionBar" />
+    <style name="Theme.FeliratFordito" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/accent</item>
+        <item name="colorOnPrimary">#3A2E00</item>
+        <item name="colorPrimaryContainer">#4A3C00</item>
+        <item name="colorOnPrimaryContainer">#FFE08A</item>
+        <item name="colorSecondaryContainer">#2A3340</item>
+        <item name="colorOnSecondaryContainer">#DDE3EC</item>
+        <item name="android:colorBackground">@color/bg</item>
+        <item name="colorSurface">@color/bg</item>
+        <item name="android:statusBarColor">@color/bg</item>
+        <item name="android:navigationBarColor">@color/bg</item>
+    </style>
 </resources>
