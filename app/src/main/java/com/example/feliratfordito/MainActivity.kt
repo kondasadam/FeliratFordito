@@ -734,6 +734,11 @@ class MainActivity : AppCompatActivity() {
     /** Takaró dobozok: felirat (párbeszéd) esetén egyetlen doboz az összes angol soron, menüknél soronként. */
     private class Cover(val rects: List<RectF>, val lineHeights: List<Float>, val lineCounts: List<Int>, val colors: List<Int>)
 
+    private var lastCover: Cover? = null
+    private val clearOverlay = Runnable {
+        if (System.currentTimeMillis() - lastTextSeenAt > 2000) overlay.clear()
+    }
+
     private fun makeCover(kept: List<Found>): Cover {
         if (kept.isEmpty()) return Cover(emptyList(), emptyList(), emptyList(), emptyList())
         // menü / választólista: sok rövid sor -> soronkénti takarás
@@ -812,7 +817,7 @@ class MainActivity : AppCompatActivity() {
         val now = System.currentTimeMillis()
         if (source.isEmpty()) {
             emptyReads++
-            if (now - lastTextSeenAt > 1200) overlay.clear()
+            if (now - lastTextSeenAt > 2000) overlay.clear()
         } else {
             emptyReads = 0
             lastTextSeenAt = now
@@ -865,6 +870,7 @@ class MainActivity : AppCompatActivity() {
         lastTranslations = emptyList()
         pendingImg = map.img
         overlay.setRects(cover.rects, cover.lineHeights, cover.lineCounts, cover.colors)
+        lastCover = cover
         if (recording && (recLines.isEmpty() || !similar(recLines.last(), best))) recLines.add(best)
         translateBlocks(finalBlocks)
     }
@@ -932,6 +938,12 @@ class MainActivity : AppCompatActivity() {
     private fun showLines(lines: List<Line>, tr: List<String>, engine: String) {
         val texts = lines.indices.map { i -> lines[i].speaker?.let { "$it: ${tr[i]}" } ?: tr[i] }
         lastTranslations = texts
+        if (overlay.count == 0) {
+            // a felirat közben eltűnt: a kész fordítást még kiírjuk a helyére pár másodpercre
+            lastCover?.let { c -> overlay.setRects(c.rects, c.lineHeights, c.lineCounts, c.colors) }
+            mainHandler.removeCallbacks(clearOverlay)
+            mainHandler.postDelayed(clearOverlay, 2500)
+        }
         overlay.setTexts(texts)
         translatedText.text = texts.joinToString("\n")
         // szürkés = gyors offline, fehér = online (Google / Gemini)
@@ -974,7 +986,7 @@ class MainActivity : AppCompatActivity() {
         var remaining = lines.size
 
         val quality = prefs.getString("quality", "pro") ?: "pro"
-        val geminiFirst = useGemini() && quality != "eco" && !(lines.size == 1 && wordCount(lines[0].body) <= 3)
+        val geminiFirst = useGemini() && quality != "eco" && !isShort(lines)
 
         fun finishOne() {
             remaining--
@@ -1019,6 +1031,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Rövid felirat (legfeljebb ~8 szó, nem menü): ezt a gyors Google fordítja, hogy időben megjelenjen. */
+    private fun isShort(lines: List<Line>): Boolean {
+        val words = lines.sumOf { wordCount(it.body) }
+        return lines.size <= 2 && words <= 8
+    }
+
     /** Amíg a pontos fordítás készül: halvány "…" a takaró dobozban (a régi szöveg már nem látszik). */
     private fun showPending(lines: List<Line>) {
         overlay.setTexts(if (overlay.count == 1) listOf("…") else lines.map { "…" })
@@ -1049,7 +1067,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun requestOnline(lines: List<Line>, googleHit: List<String?>, key: String, history: List<String>) {
         val quality = prefs.getString("quality", "pro") ?: "pro"
-        val geminiWillRun = useGemini() && !(lines.size == 1 && wordCount(lines[0].body) <= 3)
+        val geminiWillRun = useGemini() && !isShort(lines)
         // 1) Google azonnal – de Profi/Csúcs módban kihagyjuk (kevesebb szövegcsere); ott csak tartalék
         if (googleHit.any { it == null } && !(geminiWillRun && quality != "eco")) {
             netExecutor.execute {
@@ -1064,7 +1082,7 @@ class MainActivity : AppCompatActivity() {
 
         // 2) Gemini csak akkor, ha érdemes: van hosszabb mondat, és a felirat fél másodpercig kint marad.
         //    Egy feliratváltás = egyetlen kérés (a sorokat együtt küldjük), így kímélj a keretet.
-        if (!useGemini() || (lines.size == 1 && wordCount(lines[0].body) <= 3)) return
+        if (!useGemini() || isShort(lines)) return
         val img = pendingImg
         mainHandler.postDelayed({
             if (key != lastSource) return@postDelayed   // közben jött új felirat: nem kérdezzük
