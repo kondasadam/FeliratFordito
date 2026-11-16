@@ -736,7 +736,7 @@ class MainActivity : AppCompatActivity() {
 
     private var lastCover: Cover? = null
     private val clearOverlay = Runnable {
-        if (System.currentTimeMillis() - lastTextSeenAt > 2000) overlay.clear()
+        if (System.currentTimeMillis() - lastTextSeenAt > 700) overlay.clear()
     }
 
     private fun makeCover(kept: List<Found>): Cover {
@@ -817,7 +817,7 @@ class MainActivity : AppCompatActivity() {
         val now = System.currentTimeMillis()
         if (source.isEmpty()) {
             emptyReads++
-            if (now - lastTextSeenAt > 2000) overlay.clear()
+            if (now - lastTextSeenAt > 700) overlay.clear()
         } else {
             emptyReads = 0
             lastTextSeenAt = now
@@ -831,7 +831,7 @@ class MainActivity : AppCompatActivity() {
         // Üres kép: marad az utolsó fordítás. Ugyanaz a felirat: nincs újrafordítás (nem villog).
         // Ugyanaz a felirat (kis leolvasási eltérésekkel), vagy friss felirat, ami még nem tér el lényegesen
         val sameAsShown = lastSource.isNotEmpty() &&
-            (sameSubtitle(source, lastSource) || (now - lastCommitAt < 1000 && textSimilarity(source, lastSource) > 0.5))
+            (sameSubtitle(source, lastSource) || (now - lastCommitAt < 600 && textSimilarity(source, lastSource) > 0.6))
         if (source.isEmpty() || sameAsShown) {
             if (source.isNotEmpty()) {
                 // ugyanaz a felirat: a fordítás kövesse, ha kicsit elmozdult a kép
@@ -846,7 +846,12 @@ class MainActivity : AppCompatActivity() {
             busy.set(false)
             return
         }
-        // Új szöveg: csak akkor fordítjuk, ha több egymás utáni képen is ugyanaz (videónál 3, fényképnél 2)
+        // Új szöveg jelent meg: a régi fordítást azonnal levesszük, hogy ne álljon kint az új angol fölött
+        if (lastTranslations.isNotEmpty() || overlay.count > 0) {
+            overlay.clear()
+            lastTranslations = emptyList()
+        }
+        // Új szöveg: csak akkor fordítjuk, ha több egymás utáni képen is ugyanaz
         if (candidate.isNotEmpty() && sameSubtitle(source, candidate)) candidateCount++ else {
             candidate = source
             candidateCount = 1
@@ -942,7 +947,7 @@ class MainActivity : AppCompatActivity() {
             // a felirat közben eltűnt: a kész fordítást még kiírjuk a helyére pár másodpercre
             lastCover?.let { c -> overlay.setRects(c.rects, c.lineHeights, c.lineCounts, c.colors) }
             mainHandler.removeCallbacks(clearOverlay)
-            mainHandler.postDelayed(clearOverlay, 2500)
+            mainHandler.postDelayed(clearOverlay, 1500)
         }
         overlay.setTexts(texts)
         translatedText.text = texts.joinToString("\n")
