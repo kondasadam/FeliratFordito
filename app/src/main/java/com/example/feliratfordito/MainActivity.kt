@@ -731,6 +731,29 @@ class MainActivity : AppCompatActivity() {
 
     private class Found(val text: String, val rect: RectF, val lineH: Float, val lines: Int, val bg: Int)
 
+    /** Takaró dobozok: felirat (párbeszéd) esetén egyetlen doboz az összes angol soron, menüknél soronként. */
+    private class Cover(val rects: List<RectF>, val lineHeights: List<Float>, val lineCounts: List<Int>, val colors: List<Int>)
+
+    private fun makeCover(kept: List<Found>): Cover {
+        if (kept.isEmpty()) return Cover(emptyList(), emptyList(), emptyList(), emptyList())
+        // menü / választólista: sok rövid sor -> soronkénti takarás
+        val avgWords = kept.map { wordCount(it.text) }.average()
+        val isMenu = kept.size >= 3 && avgWords <= 4
+        if (isMenu || kept.size == 1 && wordCount(kept[0].text) <= 3) {
+            return Cover(kept.map { it.rect }, kept.map { it.lineH }, kept.map { it.lines }, kept.map { it.bg })
+        }
+        val union = RectF(kept[0].rect)
+        kept.forEach { union.union(it.rect) }
+        val pad = 8f * resources.displayMetrics.density
+        union.inset(-pad, -pad / 2)
+        return Cover(
+            listOf(union),
+            listOf(kept.map { it.lineH }.average().toFloat()),
+            listOf(kept.sumOf { it.lines }),
+            listOf(kept[0].bg)
+        )
+    }
+
     /** Felismert szövegdoboz -> hely a képernyőn. */
     private fun toViewRect(b: Rect, m: CropMap): RectF {
         val k = m.sample / m.enh   // felismert koordináta -> teljes felbontású kijelzett koordináta
@@ -782,6 +805,7 @@ class MainActivity : AppCompatActivity() {
         val lineHeights = kept.map { it.lineH }
         val lineCounts = kept.map { it.lines }
         val colors = kept.map { it.bg }
+        val cover = makeCover(kept)
         val source = blocks.joinToString("\n")
 
         // A felirat eltűnt: csak ha kb. 1,2 mp-ig nincs szöveg, vesszük le (egy-egy kihagyott kép miatt nem villan)
@@ -806,9 +830,9 @@ class MainActivity : AppCompatActivity() {
         if (source.isEmpty() || sameAsShown) {
             if (source.isNotEmpty()) {
                 // ugyanaz a felirat: a fordítás kövesse, ha kicsit elmozdult a kép
-                if (overlay.count == rects.size) overlay.moveRects(rects)
+                if (overlay.count == cover.rects.size) overlay.moveRects(cover.rects)
                 else if (overlay.count == 0 && lastTranslations.isNotEmpty()) {
-                    overlay.setRects(rects, lineHeights, lineCounts, colors)
+                    overlay.setRects(cover.rects, cover.lineHeights, cover.lineCounts, cover.colors)
                     overlay.setTexts(lastTranslations)
                 }
             }
@@ -840,7 +864,7 @@ class MainActivity : AppCompatActivity() {
         sourceText.text = best
         lastTranslations = emptyList()
         pendingImg = map.img
-        overlay.setRects(rects, lineHeights, lineCounts, colors)
+        overlay.setRects(cover.rects, cover.lineHeights, cover.lineCounts, cover.colors)
         if (recording && (recLines.isEmpty() || !similar(recLines.last(), best))) recLines.add(best)
         translateBlocks(finalBlocks)
     }
@@ -949,10 +973,23 @@ class MainActivity : AppCompatActivity() {
         val results = arrayOfNulls<String>(lines.size)
         var remaining = lines.size
 
+        val quality = prefs.getString("quality", "pro") ?: "pro"
+        val geminiFirst = useGemini() && quality != "eco" && !(lines.size == 1 && wordCount(lines[0].body) <= 3)
+
         fun finishOne() {
             remaining--
             if (remaining == 0) {
-                if (googleHit.all { it != null }) {
+                if (geminiFirst) {
+                    // nem mutatunk pontatlan gyors fordítást: rövid "…" jelzés, amíg a Gemini válaszol
+                    showPending(lines)
+                    val offline = results.map { it ?: "" }
+                    // ha a Gemini 3 mp alatt sem válaszol: tartalék (Google, vagy ha az sincs, offline)
+                    mainHandler.postDelayed({
+                        if (key == lastSource && geminiShownFor != key && lastTranslations.isEmpty()) {
+                            googleFallback(lines, key, offline)
+                        }
+                    }, 3000)
+                } else if (googleHit.all { it != null }) {
                     showLines(lines, googleHit.map { it!! }, "Google")
                 } else {
                     showLines(lines, results.map { it ?: "" }, "offline")
@@ -978,6 +1015,31 @@ class MainActivity : AppCompatActivity() {
                         results[i] = ln.body
                         finishOne()
                     }
+            }
+        }
+    }
+
+    /** Amíg a pontos fordítás készül: halvány "…" a takaró dobozban (a régi szöveg már nem látszik). */
+    private fun showPending(lines: List<Line>) {
+        overlay.setTexts(if (overlay.count == 1) listOf("…") else lines.map { "…" })
+        translatedText.text = "…"
+        translatedText.setTextColor(Color.rgb(150, 150, 150))
+        val info = if (lastCropInfo.isNotEmpty()) " · $lastCropInfo" else ""
+        sourceText.text = "$lastSource   [Gemini…$info]"
+    }
+
+    /** Tartalék fordítás: Google, ha nincs internet/Google sem megy, akkor az offline (ha megadták). */
+    private fun googleFallback(lines: List<Line>, key: String, offline: List<String>?) {
+        netExecutor.execute {
+            val out = lines.map { googleCache[it.body] ?: googleTranslate(it.body) }
+            runOnUiThread {
+                if (key != lastSource || geminiShownFor == key) return@runOnUiThread
+                if (out.all { it != null }) {
+                    lines.forEachIndexed { i, ln -> googleCache[ln.body] = out[i]!! }
+                    showLines(lines, out.map { it!! }, "Google")
+                } else if (offline != null) {
+                    showLines(lines, offline, "offline")
+                }
             }
         }
     }
@@ -1019,14 +1081,7 @@ class MainActivity : AppCompatActivity() {
                     } else if (key == lastSource) {
                         sourceText.text = "$lastSource   [Google · Gemini: ${Gemini.lastError}]"
                         // tartalék: Google-fordítás, ha a Gemini nem válaszolt
-                        netExecutor.execute {
-                            val out = lines.map { googleCache[it.body] ?: googleTranslate(it.body) }
-                            if (out.any { it == null }) return@execute
-                            runOnUiThread {
-                                lines.forEachIndexed { i, ln -> googleCache[ln.body] = out[i]!! }
-                                if (key == lastSource && geminiShownFor != key) showLines(lines, out.map { it!! }, "Google")
-                            }
-                        }
+                        googleFallback(lines, key, null)
                     }
                 }
             }
