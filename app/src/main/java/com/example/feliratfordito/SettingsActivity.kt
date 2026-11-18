@@ -53,6 +53,14 @@ class SettingsActivity : AppCompatActivity() {
         bindText(R.id.keyEdit, "geminiKey", "")
         bindText(R.id.modelEdit, "geminiModel", Gemini.DEFAULT_MODEL)
 
+        // Sebesség
+        val speedGroup = findViewById<RadioGroup>(R.id.speedGroup)
+        speedGroup.check(if (prefs.getString("speed", "instant") == "accurate") R.id.speedAccurate else R.id.speedInstant)
+        speedGroup.setOnCheckedChangeListener { _, id ->
+            prefs.edit().putString("speed", if (id == R.id.speedAccurate) "accurate" else "instant").apply()
+            bump()
+        }
+
         // Fordítás minősége
         val qualityGroup = findViewById<RadioGroup>(R.id.qualityGroup)
         qualityGroup.check(

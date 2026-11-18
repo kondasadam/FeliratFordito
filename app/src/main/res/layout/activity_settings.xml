@@ -83,6 +83,32 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="16dp"
+                        android:text="Sebesség"
+                        android:textColor="#FFFFFF"
+                        android:textSize="16sp" />
+
+                    <RadioGroup
+                        android:id="@+id/speedGroup"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content">
+
+                        <com.google.android.material.radiobutton.MaterialRadioButton
+                            android:id="@+id/speedInstant"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Azonnali – telefonos fordítás rögtön, a Google pontosít (leggyorsabb)" />
+
+                        <com.google.android.material.radiobutton.MaterialRadioButton
+                            android:id="@+id/speedAccurate"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Pontos – a hosszabb mondatokat a Gemini is pontosítja (lassabb)" />
+                    </RadioGroup>
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="16dp"
                         android:text="Fordítás minősége"
                         android:textColor="#FFFFFF"
                         android:textSize="16sp" />

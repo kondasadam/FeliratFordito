@@ -108,7 +108,9 @@ class MainActivity : AppCompatActivity() {
 
     private var imageCapture: ImageCapture? = null
     private val capturing = AtomicBoolean(false)
-    private var readMode = "screen"   // photo = éles fényképekből (pontos), video = videóképből (gyors)
+    private var readMode = "screen"
+    /** Azonnali mód: telefonos fordítás azonnal, Google pontosít, Gemini nélkül (a leggyorsabb). */
+    private fun instant() = (prefs.getString("speed", "instant") ?: "instant") == "instant"   // photo = éles fényképekből (pontos), video = videóképből (gyors)
 
     private var camera: Camera? = null
     private lateinit var analysisExecutor: ExecutorService
@@ -579,7 +581,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-            mainHandler.postDelayed(this, 120)
+            mainHandler.postDelayed(this, 60)
         }
     }
 
@@ -706,7 +708,11 @@ class MainActivity : AppCompatActivity() {
 
     /** Szürkeárnyalat + kontrasztnövelés (+ nagyítás, ha kicsi): a mozgó háttér kevésbé zavar. */
     private fun enhance(src: Bitmap, contrast: Float): Pair<Bitmap, Float> {
-        val scale = if (src.width < 900 && src.height < 900) 2f else 1f
+        val scale = when {
+            src.width < 900 && src.height < 900 -> 2f
+            src.width > 1280 -> 1280f / src.width          // nagy kivágás: kisebb kép = gyorsabb felismerés
+            else -> 1f
+        }
         val w = (src.width * scale).toInt()
         val h = (src.height * scale).toInt()
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
@@ -856,7 +862,7 @@ class MainActivity : AppCompatActivity() {
             candidate = source
             candidateCount = 1
         }
-        val needed = if (readMode == "photo") 1 else 2
+        val needed = if (readMode == "photo" || instant()) 1 else 2
         if (candidateCount < needed) {
             busy.set(false)
             return
@@ -998,6 +1004,9 @@ class MainActivity : AppCompatActivity() {
             if (remaining == 0) {
                 if (googleHit.all { it != null }) {
                     showLines(lines, googleHit.map { it!! }, "Google")
+                } else if (instant()) {
+                    // Azonnali mód: a telefonos fordítás rögtön, a Google pár tized mp múlva pontosít
+                    showLines(lines, results.map { it ?: "" }, "offline")
                 } else {
                     // Azonnali fordítás: a Google kb. 0,3 mp alatt érkezik; a pontatlanabb telefonos
                     // fordítás csak akkor jelenik meg, ha a Google 0,8 mp alatt sem válaszol
@@ -1083,7 +1092,7 @@ class MainActivity : AppCompatActivity() {
 
         // 2) Gemini csak akkor, ha érdemes: van hosszabb mondat, és a felirat fél másodpercig kint marad.
         //    Egy feliratváltás = egyetlen kérés (a sorokat együtt küldjük), így kímélj a keretet.
-        if (!useGemini() || isShort(lines)) return
+        if (!useGemini() || isShort(lines) || instant()) return
         val img = pendingImg
         mainHandler.postDelayed({
             if (key != lastSource) return@postDelayed   // közben jött új felirat: nem kérdezzük
