@@ -996,20 +996,16 @@ class MainActivity : AppCompatActivity() {
         fun finishOne() {
             remaining--
             if (remaining == 0) {
-                if (geminiFirst) {
-                    // nem mutatunk pontatlan gyors fordítást: rövid "…" jelzés, amíg a Gemini válaszol
-                    showPending(lines)
-                    val offline = results.map { it ?: "" }
-                    // ha a Gemini 3 mp alatt sem válaszol: tartalék (Google, vagy ha az sincs, offline)
-                    mainHandler.postDelayed({
-                        if (key == lastSource && geminiShownFor != key && lastTranslations.isEmpty()) {
-                            googleFallback(lines, key, offline)
-                        }
-                    }, 3000)
-                } else if (googleHit.all { it != null }) {
+                if (googleHit.all { it != null }) {
                     showLines(lines, googleHit.map { it!! }, "Google")
                 } else {
-                    showLines(lines, results.map { it ?: "" }, "offline")
+                    // Azonnali fordítás: a Google kb. 0,3 mp alatt érkezik; a pontatlanabb telefonos
+                    // fordítás csak akkor jelenik meg, ha a Google 0,8 mp alatt sem válaszol
+                    showPending(lines)
+                    val offline = results.map { it ?: "" }
+                    mainHandler.postDelayed({
+                        if (key == lastSource && lastTranslations.isEmpty()) showLines(lines, offline, "offline")
+                    }, 800)
                 }
                 busy.set(false)
                 requestOnline(lines, googleHit, key, history)
@@ -1074,7 +1070,7 @@ class MainActivity : AppCompatActivity() {
         val quality = prefs.getString("quality", "pro") ?: "pro"
         val geminiWillRun = useGemini() && !isShort(lines)
         // 1) Google azonnal – de Profi/Csúcs módban kihagyjuk (kevesebb szövegcsere); ott csak tartalék
-        if (googleHit.any { it == null } && !(geminiWillRun && quality != "eco")) {
+        if (googleHit.any { it == null }) {
             netExecutor.execute {
                 val out = lines.indices.map { i -> googleHit[i] ?: googleTranslate(lines[i].body) }
                 if (out.any { it == null }) return@execute   // nincs internet: marad az offline
